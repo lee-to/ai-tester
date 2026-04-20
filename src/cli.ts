@@ -7,6 +7,7 @@ import { trendCommand } from "./commands/trend.js";
 import { compareCommand } from "./commands/compare.js";
 import { traceCommand } from "./commands/trace.js";
 import { sandboxPruneCommand } from "./commands/sandbox-prune.js";
+import { initCommand } from "./commands/init.js";
 
 const pkg = JSON.parse(
   readFileSync(
@@ -21,6 +22,35 @@ program
   .name("ai-tester")
   .description("Behavioral test harness for Claude Code skills and bare prompts (multi-runtime)")
   .version(pkg.version);
+
+program
+  .command("init")
+  .description("Create a default .ai-tester.yaml in the current directory")
+  .option("--force", "Overwrite an existing .ai-tester.yaml")
+  .option("--skills-dir <path>", "Directory where skills live, relative to the config", "./skills")
+  .option("--model <id>", "Default model id", "claude-sonnet-4-6")
+  .option(
+    "--permission-mode <mode>",
+    "Default permission_mode (acceptEdits|bypassPermissions|plan|default)",
+    "bypassPermissions"
+  )
+  .action(async (opts) => {
+    const allowedModes = ["acceptEdits", "bypassPermissions", "plan", "default"] as const;
+    if (!allowedModes.includes(opts.permissionMode)) {
+      console.error(
+        `Invalid --permission-mode "${opts.permissionMode}". ` +
+          `Expected one of: ${allowedModes.join(", ")}`
+      );
+      process.exit(2);
+    }
+    const exitCode = await initCommand({
+      force: opts.force === true,
+      skillsDir: opts.skillsDir,
+      model: opts.model,
+      permissionMode: opts.permissionMode,
+    });
+    process.exit(exitCode);
+  });
 
 program
   .command("run")

@@ -34,12 +34,7 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 npm install -g @cutcode/ai-tester
 
 # 2. Create a config at your project root
-cat > .ai-tester.yaml <<'YAML'
-skills_dir: ./skills
-defaults:
-  model: claude-sonnet-4-6
-  permission_mode: bypassPermissions
-YAML
+ai-tester init
 
 # 3. Check which runtimes are ready on this machine
 ai-tester runtimes

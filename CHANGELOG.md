@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-20
+
+### Added
+
+- `ai-tester init` command that writes a default `.ai-tester.yaml` into the current directory. Supports `--force`, `--skills-dir`, `--model`, and `--permission-mode` overrides.
+
+### Changed
+
+- Renamed the npm package from `@lee-to/ai-tester` to `@cutcode/ai-tester`.
+- README quick-start now uses `ai-tester init` instead of a heredoc for writing the config.
+
 ## [0.1.0] - 2026-04-18
 
 Initial public release.
@@ -31,5 +42,6 @@ Initial public release.
 - Live progress reporter with idle-warning (`--idle-warn`) and `--quiet` mode.
 - Weighted scoring (`scoring.weightedScore`) for future trend analysis.
 
-[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.2.0
 [0.1.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.1.0
