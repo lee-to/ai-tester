@@ -1,0 +1,8 @@
+node_modules/
+dist/
+runs/
+cache/
+*.log
+*.tgz
+.claude/
+.DS_Store

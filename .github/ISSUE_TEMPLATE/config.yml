@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/lee-to/ai-tester/security/advisories/new
+    about: Report a security issue privately. Do not open a public issue.
+  - name: Question / discussion
+    url: https://github.com/lee-to/ai-tester/discussions
+    about: Ask a question or discuss an idea before filing a feature request.

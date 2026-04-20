@@ -1,0 +1,74 @@
+{
+  "name": "@lee-to/ai-tester",
+  "version": "0.1.0",
+  "description": "Behavioral test harness for Claude Code skills and bare prompts. Multi-runtime (Claude, Codex) with real tools in an isolated git sandbox.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-agent-sdk",
+    "codex",
+    "openai-codex",
+    "agent",
+    "agents",
+    "skills",
+    "llm",
+    "testing",
+    "test-harness",
+    "prompt-testing",
+    "e2e"
+  ],
+  "homepage": "https://github.com/lee-to/ai-tester#readme",
+  "bugs": {
+    "url": "https://github.com/lee-to/ai-tester/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lee-to/ai-tester.git"
+  },
+  "license": "MIT",
+  "author": "lee-to <thecutcode@gmail.com> (https://github.com/lee-to)",
+  "type": "module",
+  "bin": {
+    "ai-tester": "./bin/ai-tester.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "clean": "rm -rf dist",
+    "lint": "tsc --noEmit",
+    "format": "prettier --write \"src/**/*.ts\" \"scripts/**/*.mjs\" \"tests/**/*.mjs\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"scripts/**/*.mjs\" \"tests/**/*.mjs\"",
+    "audit": "npm audit --omit=dev --audit-level=high",
+    "test:unit": "node --test tests/util/regex.test.mjs tests/skill/allowed-tools.test.mjs tests/scenario/schema.test.mjs tests/sandbox/worktree.test.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "test": "npm run build && npm run test:unit && node scripts/smoke.mjs",
+    "prepublishOnly": "npm run clean && npm run build && npm run test:unit && node scripts/smoke.mjs",
+    "start": "node bin/ai-tester.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.90",
+    "@openai/codex-sdk": "^0.118.0",
+    "chalk": "^5.3.0",
+    "commander": "^12.1.0",
+    "gray-matter": "^4.0.3",
+    "yaml": "^2.6.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "prettier": "^3.8.3",
+    "typescript": "^5.3.3"
+  }
+}
