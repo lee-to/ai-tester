@@ -40,7 +40,7 @@ We credit reporters in release notes by default. Let us know if you prefer to re
 
 In scope:
 
-- The `@lee-to/ai-tester` npm package and anything it ships (`bin/`, `dist/`).
+- The `@cutcode/ai-tester` npm package and anything it ships (`bin/`, `dist/`).
 - The scenario schema and its handling of user-supplied YAML / filesystem paths.
 - The sandbox lifecycle (`src/sandbox/`) — particularly anything that could escape the sandbox or leak host filesystem state.
 

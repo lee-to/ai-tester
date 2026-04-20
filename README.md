@@ -2,9 +2,9 @@
 
 > End-to-end behavioral testing for **Claude Code skills**, **bare system prompts**, and any **agent runtime** — run real scenarios in an isolated git sandbox, capture the full tool-call trace, and assert it against declarative YAML.
 
-[![npm](https://img.shields.io/npm/v/@lee-to/ai-tester.svg)](https://www.npmjs.com/package/@lee-to/ai-tester)
+[![npm](https://img.shields.io/npm/v/@cutcode/ai-tester.svg)](https://www.npmjs.com/package/@cutcode/ai-tester)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![node](https://img.shields.io/node/v/@lee-to/ai-tester.svg)](https://nodejs.org)
+[![node](https://img.shields.io/node/v/@cutcode/ai-tester.svg)](https://nodejs.org)
 [![CI](https://github.com/lee-to/ai-tester/actions/workflows/ci.yml/badge.svg)](https://github.com/lee-to/ai-tester/actions/workflows/ci.yml)
 
 ---
@@ -31,7 +31,7 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 
 ```bash
 # 1. Install
-npm install -g @lee-to/ai-tester
+npm install -g @cutcode/ai-tester
 
 # 2. Create a config at your project root
 cat > .ai-tester.yaml <<'YAML'
@@ -54,13 +54,13 @@ ai-tester run
 
 ```bash
 # Global (recommended for CLI usage)
-npm install -g @lee-to/ai-tester
+npm install -g @cutcode/ai-tester
 
 # Or run without installing
-npx @lee-to/ai-tester run
+npx @cutcode/ai-tester run
 
 # Per-project dev dependency
-npm install --save-dev @lee-to/ai-tester
+npm install --save-dev @cutcode/ai-tester
 ```
 
 Requires **Node.js 18 or newer**. Building from source? See [CONTRIBUTING.md](./CONTRIBUTING.md).
