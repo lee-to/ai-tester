@@ -1,6 +1,6 @@
 # ai-tester
 
-> End-to-end behavioral testing for **Claude Code skills**, **bare system prompts**, and any **agent runtime** — run real scenarios in an isolated git sandbox, capture the full tool-call trace, and assert it against declarative YAML.
+> End-to-end behavioral testing for **skills**, **bare system prompts**, and any **agent runtime** — run real scenarios in an isolated git sandbox, capture the full tool-call trace, and assert it against declarative YAML.
 
 [![npm](https://img.shields.io/npm/v/@cutcode/ai-tester.svg)](https://www.npmjs.com/package/@cutcode/ai-tester)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
