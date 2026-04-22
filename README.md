@@ -23,7 +23,7 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 - **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML.
 - **First-class fixtures.** Inline strings, file-backed `content_from`, or whole directory trees via `copy_trees` — perfect for testing skills against a realistic repo.
 - **Deterministic traces.** Every run writes a JSON trace with turns, tool calls, assertions, scoring, and cost — replay / diff / compare later.
-- **Token accounting & budgets.** Per-run totals in `=== Results ===` and a declarative `token_budget` (in SKILL.md or in the scenario YAML) that fails the scenario when exceeded. See [Token consumption & budgets](#token-consumption--budgets).
+- **Token accounting & budgets.** Per-run totals in `=== Results ===`, a per-skill `token-budget` in SKILL.md that fails the scenario when exceeded, and `ai-tester history` for browsing token spend across past runs. See [Run history & token consumption](#run-history--token-consumption).
 - **Safe sandboxing.** Automatic cleanup on exit or SIGINT/SIGTERM/SIGHUP, plus `ai-tester sandbox-prune` for the `kill -9` cases.
 - **Security guardrails.** Declarative rules catch external calls (`WebFetch`/`WebSearch`), covert shell networking (`curl`/`ssh`/`git push`), path escapes, and dotfile reads — before a skill ships. See [Skill security checks](#skill-security-checks).
 - **Zero provider API keys.** Runs bill against your logged-in Claude Max/Pro or ChatGPT subscription. `OPENAI_API_KEY` is an optional fallback for Codex.
@@ -119,6 +119,17 @@ ai-tester run --file /path/to/scenario.yaml
 # Dry-run the same file without hitting the SDK.
 ai-tester run --file /path/to/scenario.yaml --dry-run
 
+# --- Inspecting past runs ------------------------------------------------
+
+# Show the most recent runs with timestamp, pass/fail, tokens, cost.
+ai-tester history
+
+# Filter by skill and/or scenario; limit the list.
+ai-tester history aif-plan --scenario fast-creates-plan-md --last 10
+
+# Raw JSON for piping into jq / spreadsheets / dashboards.
+ai-tester history --json
+
 # --- Housekeeping --------------------------------------------------------
 
 # Self-check the assertion evaluators with a synthetic trace (no SDK, no sandbox).
@@ -147,6 +158,7 @@ ai-tester sandbox-prune --min-age 300 --yes   # only older than 5 min
 ### Other commands
 
 - `ai-tester runtimes` — list registered runtimes and their readiness status.
+- `ai-tester history [skill] [--scenario <id>] [--last <n>] [--json]` — browse prior runs stored in `runs/`. See [Run history & token consumption](#run-history--token-consumption).
 - `ai-tester sandbox-prune [--yes] [--min-age <s>]` — find/delete orphan sandboxes.
 - `npm run smoke` — synthetic-trace self-check of the assertion evaluators.
 
@@ -509,7 +521,7 @@ All file-path tool calls stayed inside the sandbox (or explicitly allowed prefix
 
 - **`no_unanswered_questions`** — every `AskUserQuestion` question had a matching `user_responses` entry. If the skill asks a new question the scenario didn't anticipate, this fires. Fix: add an entry or widen `match_question`.
 - **`turn_budget`** — fires only when `max_turns` is set explicitly AND the SDK stopped with subtype `error_max_turns`. See "Turn budget" below.
-- **`token_budget`** — fires only when the scenario (`token_budget: <N>`) or its skill (`token-budget: <N>` in SKILL.md) declares a budget and the run's `input + output + cache-creation + cache-read` exceeds it. Scenario wins over skill. See [Token consumption & budgets](#token-consumption--budgets).
+- **`token_budget`** — fires only when the scenario (`token_budget: <N>`) or its skill (`token-budget: <N>` in SKILL.md) declares a budget and the run's `input + output + cache-creation + cache-read` exceeds it. Scenario wins over skill. See [Token budget](#token-budget).
 
 ### Regex semantics
 
@@ -727,7 +739,7 @@ The trace includes:
 
 ---
 
-## Token consumption & budgets
+## Run history & token consumption
 
 Every run's `cost` block records `inputTokens`, `outputTokens`, `cacheCreationTokens`, and `cacheReadTokens`. The runner aggregates these across scenarios and prints them in the final `=== Results ===` block alongside the USD estimate:
 
@@ -774,6 +786,37 @@ When set, the implicit `token_budget` assertion runs after every scenario. If th
 
 Omit the field and nothing changes — skills/scenarios without a budget behave exactly as before.
 
+### Browsing historical runs
+
+`ai-tester history` reads every trace under `runs/` and renders a table sorted newest-first:
+
+```bash
+$ ai-tester history --last 5
+=== Run history === (showing 5 of 12)
+
+  ✗ 2026-04-22 10:55  aif-plan/fast-creates-plan-md                 11.6s  1t  0 tok  —
+      3 error(s); trace: runs/aif-plan/aif-plan__2026-04-22T07-55-20Z__1.0.0__c0544baf.json
+  ✓ 2026-04-22 10:54  aif-plan/fast-creates-plan-md                 1m12s  20t  251,709 tok  ~$0.1782
+  ✓ 2026-04-22 10:49  aif-plan/fast-creates-plan-md                 1m29s  29t  293,271 tok  ~$0.2128
+  ✗ 2026-04-17 19:10  aif-plan/fast-creates-plan-md                 1m19s  1t  420,604 tok  —
+  ✗ 2026-04-17 19:09  aif-plan/fast-creates-plan-md                 10.8s  1t  0 tok  —
+
+  Σ 5 run(s), 2 pass, 3 fail, 965,584 tokens, ~$0.3910
+```
+
+Columns: ✓/✗, timestamp, `skill/scenario`, duration, turns, total tokens (plus `/<token-budget>` if declared), USD estimate. Scenarios that tripped `token_budget` get a red `over-budget` tag inline.
+
+Flags:
+
+| Flag | Effect |
+| --- | --- |
+| `[skill]` | Positional filter to one skill directory. |
+| `--scenario <id>` | Only runs whose `scenario:` id matches. |
+| `--last <n>` | Show only the last `N` entries (default `20`). |
+| `--json` | Emit the raw array instead of the formatted table — pipe into `jq`, spreadsheets, dashboards. |
+
+Use it after a batch run to spot token drift before it becomes a cost surprise, or pair with `--json` to feed an external trend chart.
+
 ---
 
 ## Sandbox lifecycle
@@ -801,7 +844,7 @@ The `--min-age <seconds>` flag (default `60`) keeps in-flight runs safe — a cu
 
 ## Still coming
 
-- `trend` / `compare` / `trace` commands (Phase 5)
+- `trend` / `compare` / `trace` commands (Phase 5) — see `ai-tester history` above for the basic list view that's already shipped.
 - LLM judges for semantic assertions — `output_is_question`, `llm_judge` with rubric (Phase 4)
 - Shared `_fixtures.yaml` that scenarios can extend (Phase 6)
 - Trials mode (`--trials N`) with pass-rate reporting (Phase 6)

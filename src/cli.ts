@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { runCommand } from "./commands/run.js";
+import { historyCommand } from "./commands/history.js";
 import { trendCommand } from "./commands/trend.js";
 import { compareCommand } from "./commands/compare.js";
 import { traceCommand } from "./commands/trace.js";
@@ -88,6 +89,24 @@ program
       console.error((err as Error).message);
       process.exit(2);
     }
+  });
+
+program
+  .command("history")
+  .description("Show recent runs recorded in runs/ (timestamp, result, tokens, cost)")
+  .argument("[skill]", "Filter to one skill")
+  .option("--scenario <name>", "Filter to one scenario id")
+  .option("--last <n>", "Show only the last N runs", "20")
+  .option("--json", "Emit raw JSON instead of a formatted table")
+  .action(async (skill, opts) => {
+    const parsed = Number.parseInt(opts.last, 10);
+    const exitCode = await historyCommand({
+      skill,
+      scenario: opts.scenario,
+      last: Number.isFinite(parsed) && parsed > 0 ? parsed : 20,
+      json: opts.json === true,
+    });
+    process.exit(exitCode);
   });
 
 program
