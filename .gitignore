@@ -4,6 +4,7 @@ runs/
 cache/
 skills
 prompts
+.ai-tester.yaml
 *.log
 *.tgz
 .claude/
