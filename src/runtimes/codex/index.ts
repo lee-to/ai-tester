@@ -49,7 +49,10 @@ export function createCodexRuntime(): RuntimeAdapter {
 }
 
 async function runCodex(req: RuntimeRunRequest): Promise<RuntimeRunResult> {
-  const { skill, scenario, cwd, firstUserMessage, onProgress } = req;
+  const { skill, scenario, cwd, userMessages, onProgress } = req;
+  if (userMessages.length === 0) {
+    throw new Error("codex runtime: userMessages must contain at least one entry");
+  }
 
   const startedAtMs = Date.now();
   let lastEventMs = startedAtMs;
@@ -83,10 +86,6 @@ async function runCodex(req: RuntimeRunRequest): Promise<RuntimeRunResult> {
   const codex = new Codex({ env: buildCodexEnv() });
   const thread = codex.startThread(threadOptions);
 
-  // Codex does not take a separate system prompt — we fold the skill body into
-  // the first user turn, with the skill install path (if any) as context.
-  const combinedInput = buildCodexInput(skill.body, req.skillInstallRelPath, firstUserMessage);
-
   const turns: Turn[] = [];
   let currentTurn: Turn | null = null;
   const cost = {
@@ -105,74 +104,93 @@ async function runCodex(req: RuntimeRunRequest): Promise<RuntimeRunResult> {
   const abort = new AbortController();
 
   try {
-    const streamed = await thread.runStreamed(combinedInput, { signal: abort.signal });
-    for await (const event of streamed.events as AsyncGenerator<ThreadEvent>) {
-      const elapsed = Date.now() - startedAtMs;
-      switch (event.type) {
-        case "thread.started":
-          sessionId = event.thread_id;
-          emit({ kind: "system_init", sessionId, elapsedMs: elapsed });
-          break;
-
-        case "turn.started":
-          turnCount++;
-          currentTurn = {
-            index: turns.length,
-            role: "assistant",
-            textDeltas: [],
-            toolCalls: [],
-          };
-          turns.push(currentTurn);
-          if (turnCount > maxTurnsEffective) {
-            stoppedReason = "max_turns";
-            abort.abort();
-          }
-          break;
-
-        case "item.started":
-          handleItem(event.item, false, currentTurn, emit, startedAtMs);
-          break;
-
-        case "item.completed":
-          handleItem(event.item, true, currentTurn, emit, startedAtMs);
-          if (event.item.type === "agent_message") {
-            finalOutput = event.item.text;
-          }
-          break;
-
-        case "turn.completed":
-          if (event.usage) {
-            cost.inputTokens += event.usage.input_tokens;
-            cost.outputTokens += event.usage.output_tokens;
-            cost.cacheReadTokens += event.usage.cached_input_tokens;
-          }
-          emit({
-            kind: "result",
-            subtype: "success",
-            usdEstimate: cost.usdEstimate,
-            elapsedMs: elapsed,
-          });
-          break;
-
-        case "turn.failed":
-          errors.push({ kind: "codex_turn_failed", message: event.error.message });
-          stoppedReason = "error";
-          emit({
-            kind: "result",
-            subtype: "error",
-            usdEstimate: cost.usdEstimate,
-            elapsedMs: elapsed,
-          });
-          break;
-
-        case "error":
-          errors.push({ kind: "codex_stream_error", message: event.message });
-          stoppedReason = "error";
-          break;
-
-        default:
-          break;
+    for (let i = 0; i < userMessages.length; i++) {
+      // First scripted turn folds the skill body in as Codex has no separate
+      // system prompt. Subsequent turns are sent plain — the thread already
+      // has the skill context from the first message.
+      const input =
+        i === 0
+          ? buildCodexInput(skill.body, req.skillInstallRelPath, userMessages[0])
+          : userMessages[i];
+      if (userMessages.length > 1) {
+        emit({
+          kind: "scripted_prompt",
+          step: i + 1,
+          total: userMessages.length,
+          text: userMessages[i],
+          elapsedMs: Date.now() - startedAtMs,
+        });
       }
+      const streamed = await thread.runStreamed(input, { signal: abort.signal });
+      for await (const event of streamed.events as AsyncGenerator<ThreadEvent>) {
+        const elapsed = Date.now() - startedAtMs;
+        switch (event.type) {
+          case "thread.started":
+            sessionId = event.thread_id;
+            emit({ kind: "system_init", sessionId, elapsedMs: elapsed });
+            break;
+
+          case "turn.started":
+            turnCount++;
+            currentTurn = {
+              index: turns.length,
+              role: "assistant",
+              textDeltas: [],
+              toolCalls: [],
+            };
+            turns.push(currentTurn);
+            if (turnCount > maxTurnsEffective) {
+              stoppedReason = "max_turns";
+              abort.abort();
+            }
+            break;
+
+          case "item.started":
+            handleItem(event.item, false, currentTurn, emit, startedAtMs);
+            break;
+
+          case "item.completed":
+            handleItem(event.item, true, currentTurn, emit, startedAtMs);
+            if (event.item.type === "agent_message") {
+              finalOutput = event.item.text;
+            }
+            break;
+
+          case "turn.completed":
+            if (event.usage) {
+              cost.inputTokens += event.usage.input_tokens;
+              cost.outputTokens += event.usage.output_tokens;
+              cost.cacheReadTokens += event.usage.cached_input_tokens;
+            }
+            emit({
+              kind: "result",
+              subtype: "success",
+              usdEstimate: cost.usdEstimate,
+              elapsedMs: elapsed,
+            });
+            break;
+
+          case "turn.failed":
+            errors.push({ kind: "codex_turn_failed", message: event.error.message });
+            stoppedReason = "error";
+            emit({
+              kind: "result",
+              subtype: "error",
+              usdEstimate: cost.usdEstimate,
+              elapsedMs: elapsed,
+            });
+            break;
+
+          case "error":
+            errors.push({ kind: "codex_stream_error", message: event.message });
+            stoppedReason = "error";
+            break;
+
+          default:
+            break;
+        }
+      }
+      if (stoppedReason === "error" || stoppedReason === "max_turns") break;
     }
   } catch (err) {
     if ((err as Error).name !== "AbortError") {

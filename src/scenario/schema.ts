@@ -140,6 +140,25 @@ const ScenarioShape = z
     system_prompt_file: z.string().min(1).optional(),
     argument: z.string().optional(),
     /**
+     * Override the first user message verbatim. When set, the harness skips
+     * the auto-generated "Run the <skill> skill..." kickoff and sends this
+     * string as the opening turn — useful for driving the agent via
+     * `/skill-name <args>` style invocations, `$preset` prompts in Codex,
+     * or any custom phrasing. Takes precedence over `argument`.
+     * Mutually exclusive with `user_prompts`.
+     */
+    user_prompt: z.string().min(1).optional(),
+    /**
+     * Chain of user messages sent sequentially in the same agent session —
+     * each subsequent entry is delivered after the agent finishes its
+     * previous turn (stop_reason=end_turn). Use for warm-up flows like
+     * "study the codebase" followed by the real request. Context and tool
+     * history accumulate across the whole chain; budgets (turns, tokens)
+     * apply to the aggregated run, not to individual steps. Mutually
+     * exclusive with `user_prompt`.
+     */
+    user_prompts: z.array(z.string().min(1)).min(1).optional(),
+    /**
      * Explicit hard cap on turns. When present, exceeding it fails the scenario.
      * When absent, the runner uses an internal safety cap and hitting it emits
      * a warning but does not fail the scenario.
@@ -182,7 +201,12 @@ export const ScenarioSchema = z
         "scenario must declare exactly one of: `skill`, `system_prompt`, or `system_prompt_file`",
       path: ["skill"],
     }
-  );
+  )
+  .refine((data) => !(data.user_prompt && data.user_prompts), {
+    message:
+      "scenario must declare at most one of: `user_prompt` or `user_prompts` (not both)",
+    path: ["user_prompts"],
+  });
 
 export type Scenario = z.infer<typeof ScenarioSchema>;
 export type Assertion = z.infer<typeof AssertionSchema>;

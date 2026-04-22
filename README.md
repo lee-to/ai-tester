@@ -20,6 +20,7 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 - **Real runs, real tools.** Each scenario executes inside an isolated `git` worktree under `$TMPDIR`. Reads, writes, edits, shell commands — all hit the sandbox filesystem.
 - **Multi-runtime.** Claude (via `@anthropic-ai/claude-agent-sdk`) and OpenAI Codex (via `@openai/codex-sdk`) out of the box. A single `RuntimeAdapter` interface makes adding new ones a one-file job.
 - **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file — same runner, same assertions.
+- **Scripted user turns.** Override the kickoff with `user_prompt` for a custom opening message, or `user_prompts` for a warm-up → real-request chain delivered in a single agent session.
 - **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML.
 - **First-class fixtures.** Inline strings, file-backed `content_from`, or whole directory trees via `copy_trees` — perfect for testing skills against a realistic repo.
 - **Deterministic traces.** Every run writes a JSON trace with turns, tool calls, assertions, scoring, and cost — replay / diff / compare later.
@@ -213,6 +214,43 @@ system_prompt_file: ./prompts/reviewer.md   # relative to this YAML
 argument: "review src/auth.ts"
 # ...
 ```
+
+### Scripted user turns (`user_prompt` / `user_prompts`)
+
+By default the harness builds the first user message for you:
+
+- Skill-backed scenarios: `"Run the <skill> skill defined in your system prompt. Follow its instructions end-to-end against the current working directory. Argument: <argument>"`.
+- Inline prompts: just the `argument` (or `"Begin."` if omitted).
+
+You can override this. **Two shapes, pick one — they're mutually exclusive:**
+
+**`user_prompt` (single string)** — replaces the auto-generated opener with a verbatim message. Use it to drive the agent the way a human would — `/skill-name <args>` in Claude Code, a `$preset` reference in Codex, or any custom phrasing:
+
+```yaml
+scenario: slash-invocation
+skill: aif-plan
+user_prompt: "/aif-plan fast add GET /health endpoint returning 200 OK"
+# `argument` is ignored when `user_prompt` is set — write whatever you want verbatim.
+```
+
+**`user_prompts` (list of strings)** — scripted chain of turns delivered one-by-one **in the same agent session**. Useful for warm-up flows ("study the repo first, then implement"). Each entry is sent as a fresh user turn; when the agent finishes responding, the harness transparently resumes the same session (`resume: sessionId` under the hood — the `session_id` pinned on the first init is reused for every step) and sends the next message. Context, tool history, and any side effects accumulate across the whole chain:
+
+```yaml
+scenario: warmup-then-implement
+skill: aif-plan
+user_prompts:
+  - "Study this repo. Read the key files under src/, skim package.json, and tell me the architecture in 3 sentences. Do not edit anything yet."
+  - "/aif-plan add a GET /health endpoint that returns 200 OK"
+```
+
+**Rules & gotchas:**
+
+- Declaring both `user_prompt` and `user_prompts` is a validation error. Pick one. For a single turn, use `user_prompt`; for chains of 2+, use `user_prompts`.
+- Both fields take precedence over the auto-template **and** over `argument`. Strings are sent verbatim — no `{argument}` interpolation; write the argument inline.
+- Budgets (`max_turns`, `token_budget`) and assertions apply to the **aggregated** run, not to individual steps. If you need per-step pass/fail, split into two scenarios.
+- A step that errors or exhausts `max_turns` stops the chain early; remaining scripted messages are not sent.
+- During the run each scripted turn prints as `▸ [step N/M] "..."` in magenta, so you can tell which prompt the agent is currently working on.
+- The per-step `● finished` marker is expected — it's the end of one query in the chain, not the end of the scenario. The next scripted turn resumes the same session right after.
 
 ## Complete scenario example (skill-backed)
 
@@ -714,6 +752,7 @@ The runner streams events to the terminal as they arrive. Symbols:
 | `? AskUserQuestion "..." → Commit as is` | Question matched in `user_responses` and was answered. |
 | `? AskUserQuestion "..." → no matching user_responses` | No match found — `no_unanswered_questions` will fail. |
 | `▸ "some text"` | Assistant text block (italic). |
+| `▸ [step 2/3] "..."` | Scripted user turn from `user_prompts` just sent to the agent (magenta). |
 | `● finished (success) cost ~$0.01` | Terminal `result` message from the SDK. |
 | `… idle for 30s — CLI may be stuck` | No events for the `--idle-warn` window. Ctrl-C to abort. |
 

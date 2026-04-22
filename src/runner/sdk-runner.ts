@@ -14,7 +14,8 @@ export interface SdkRunParams {
   skill: SkillRecord;
   scenario: Scenario;
   cwd: string;
-  firstUserMessage: string;
+  /** Ordered scripted user turns — at least one entry. */
+  userMessages: string[];
   skillInstallRelPath?: string | null;
   onProgress?: (event: ProgressEvent) => void;
   idleWarnSeconds?: number;
@@ -23,7 +24,10 @@ export interface SdkRunParams {
 export type SdkRunResult = RuntimeRunResult;
 
 export async function runWithSdk(params: SdkRunParams): Promise<SdkRunResult> {
-  const { skill, scenario, cwd, firstUserMessage, onProgress } = params;
+  const { skill, scenario, cwd, userMessages, onProgress } = params;
+  if (userMessages.length === 0) {
+    throw new Error("sdk-runner: userMessages must contain at least one entry");
+  }
   const startedAtMs = Date.now();
   const emit = (event: ProgressEvent) => {
     lastEventMs = Date.now();
@@ -42,21 +46,17 @@ export async function runWithSdk(params: SdkRunParams): Promise<SdkRunResult> {
     }
   }, idleWarnMs);
 
-  const queue = new MessageQueue();
-  queue.push(plainUserMessage(firstUserMessage));
-
   const appendedPrompt = buildSystemPromptAppend(skill, params.skillInstallRelPath);
 
   const maxTurnsUserSet = typeof scenario.max_turns === "number";
   const maxTurnsEffective = scenario.max_turns ?? INTERNAL_MAX_TURNS;
 
-  const options: Options = {
+  const baseOptions: Options = {
     cwd,
     // Append the skill body to Claude Code's built-in system prompt rather than
     // replacing it — CC's prompt knows about its tools, permission flow, etc.
     systemPrompt: { type: "preset", preset: "claude_code", append: appendedPrompt },
     permissionMode: scenario.runner.permission_mode as Options["permissionMode"],
-    maxTurns: maxTurnsEffective,
     model: scenario.runner.model,
     env: buildEnv(scenario),
     includePartialMessages: false,
@@ -84,75 +84,123 @@ export async function runWithSdk(params: SdkRunParams): Promise<SdkRunResult> {
   };
   let stoppedReason: SdkRunResult["stoppedReason"] = "other";
 
-  const stream = query({ prompt: queue.iterator(), options });
-
+  // Multi-turn chains are implemented as sequential `query()` calls with
+  // `resume: sessionId` — the SDK ends each query on the first `result`
+  // message (iterator-based multi-turn only works for tool_use→tool_result
+  // continuations, not end_turn→next user prompt).
   try {
-    for await (const raw of stream) {
-      const message = raw as unknown as AnyMessage;
-      const elapsed = Date.now() - startedAtMs;
-      switch (message.type) {
-        case "system":
-          if (
-            (message as { subtype?: string }).subtype === "init" &&
-            typeof message.session_id === "string"
-          ) {
-            sessionId = message.session_id;
-            emit({ kind: "system_init", sessionId, elapsedMs: elapsed });
-          }
-          break;
+    for (let i = 0; i < userMessages.length; i++) {
+      if (userMessages.length > 1) {
+        emit({
+          kind: "scripted_prompt",
+          step: i + 1,
+          total: userMessages.length,
+          text: userMessages[i],
+          elapsedMs: Date.now() - startedAtMs,
+        });
+      }
 
-        case "assistant":
-          handleAssistant(message, turns, turnById, startedAtMs, (ev) => emit(ev));
-          maybeAnswerQuestion(
-            message,
-            pendingAnswerQueue,
-            turnById,
-            queue,
-            (unanswered, info) => {
-              if (unanswered) {
-                unansweredQuestions++;
-                emit({
-                  kind: "question_unanswered",
-                  tool: info.tool,
-                  questionPreview: info.questionPreview,
-                  elapsedMs: Date.now() - startedAtMs,
-                });
-              } else if (info.chosen) {
-                emit({
-                  kind: "question_answered",
-                  tool: info.tool,
-                  chosen: info.chosen,
-                  questionPreview: info.questionPreview,
-                  elapsedMs: Date.now() - startedAtMs,
-                });
+      const turnsUsedSoFar = turns.filter((t) => t.role === "assistant").length;
+      const turnsLeft = Math.max(1, maxTurnsEffective - turnsUsedSoFar);
+      const options: Options = {
+        ...baseOptions,
+        maxTurns: turnsLeft,
+        ...(sessionId ? { resume: sessionId } : {}),
+      };
+
+      const queue = new MessageQueue();
+      queue.push(plainUserMessage(userMessages[i]));
+      const stream = query({ prompt: queue.iterator(), options });
+
+      let thisSubtype: string | null = null;
+
+      try {
+        for await (const raw of stream) {
+          const message = raw as unknown as AnyMessage;
+          const elapsed = Date.now() - startedAtMs;
+          switch (message.type) {
+            case "system":
+              if (
+                (message as { subtype?: string }).subtype === "init" &&
+                typeof message.session_id === "string"
+              ) {
+                // Pin the session to the first init and reuse it for every
+                // subsequent query via `resume`. Don't overwrite on resumed
+                // queries even if the SDK echoes a different id — the chain
+                // is conceptually one session.
+                if (!sessionId) {
+                  sessionId = message.session_id;
+                  emit({ kind: "system_init", sessionId, elapsedMs: elapsed });
+                }
               }
-            }
-          );
-          break;
+              break;
 
-        case "user":
-          handleUser(message, turnById, startedAtMs, (ev) => emit(ev));
-          break;
+            case "assistant":
+              handleAssistant(message, turns, turnById, startedAtMs, (ev) => emit(ev));
+              maybeAnswerQuestion(
+                message,
+                pendingAnswerQueue,
+                turnById,
+                queue,
+                (unanswered, info) => {
+                  if (unanswered) {
+                    unansweredQuestions++;
+                    emit({
+                      kind: "question_unanswered",
+                      tool: info.tool,
+                      questionPreview: info.questionPreview,
+                      elapsedMs: Date.now() - startedAtMs,
+                    });
+                  } else if (info.chosen) {
+                    emit({
+                      kind: "question_answered",
+                      tool: info.tool,
+                      chosen: info.chosen,
+                      questionPreview: info.questionPreview,
+                      elapsedMs: Date.now() - startedAtMs,
+                    });
+                  }
+                }
+              );
+              break;
 
-        case "result":
-          handleResult(message, cost, (outputText, reason) => {
-            if (outputText) finalOutput = outputText;
-            if (reason) stoppedReason = reason;
-          });
-          emit({
-            kind: "result",
-            subtype: typeof message.subtype === "string" ? message.subtype : null,
-            usdEstimate: cost.usdEstimate,
-            elapsedMs: elapsed,
-          });
-          // Result is terminal — close the prompt queue so the SDK stream can
-          // exit cleanly. Without this the iterator stays open and the for-await
-          // loop hangs forever.
-          queue.close();
-          break;
+            case "user":
+              handleUser(message, turnById, startedAtMs, (ev) => emit(ev));
+              break;
 
-        default:
-          break;
+            case "result":
+              handleResult(message, cost, (outputText) => {
+                if (outputText) finalOutput = outputText;
+              });
+              thisSubtype =
+                typeof message.subtype === "string" ? message.subtype : null;
+              emit({
+                kind: "result",
+                subtype: thisSubtype,
+                usdEstimate: cost.usdEstimate,
+                elapsedMs: elapsed,
+              });
+              // Result is terminal for this query — close its queue so the
+              // SDK iterator can return cleanly.
+              queue.close();
+              break;
+
+            default:
+              break;
+          }
+        }
+      } finally {
+        queue.close();
+      }
+
+      // Decide whether to continue the chain based on how this query ended.
+      if (thisSubtype === "error_max_turns") {
+        stoppedReason = "max_turns";
+        break;
+      }
+      if (thisSubtype && thisSubtype !== "success") {
+        stoppedReason = "error";
+        break;
       }
     }
   } catch (err) {
@@ -160,7 +208,6 @@ export async function runWithSdk(params: SdkRunParams): Promise<SdkRunResult> {
     stoppedReason = "error";
   } finally {
     clearInterval(idleTimer);
-    queue.close();
   }
 
   if (stoppedReason === "other" && errors.length === 0) stoppedReason = "end_turn";

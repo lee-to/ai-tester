@@ -57,6 +57,15 @@ export function printProgressEvent(event: ProgressEvent): void {
       }
       break;
     }
+    case "scripted_prompt": {
+      const preview = truncate(event.text.replaceAll("\n", " | "), 120);
+      console.log(
+        chalk.dim(`    ${t} ▸ `) +
+          chalk.magenta(`[step ${event.step}/${event.total}] `) +
+          chalk.italic(preview)
+      );
+      break;
+    }
     case "idle_warning":
       console.log(
         chalk.yellow(

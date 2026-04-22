@@ -128,16 +128,23 @@ export async function runCommand(opts: RunOptions): Promise<number> {
         console.log(chalk.dim(`    skill installed at: ${sandbox.skillInstallPath}/`));
       }
 
-      const firstUserMessage = buildFirstUserMessage(loaded, skill);
+      const userMessages = buildUserMessageChain(loaded, skill);
       if (!opts.quiet) {
-        console.log(chalk.dim(`    prompt: "${firstUserMessage.replaceAll("\n", " | ")}"`));
+        if (userMessages.length === 1) {
+          console.log(chalk.dim(`    prompt: "${userMessages[0].replaceAll("\n", " | ")}"`));
+        } else {
+          console.log(chalk.dim(`    prompts: ${userMessages.length} scripted turn(s)`));
+          for (const [i, m] of userMessages.entries()) {
+            console.log(chalk.dim(`      [${i + 1}] "${m.replaceAll("\n", " | ")}"`));
+          }
+        }
       }
 
       const loop = await runtime.run({
         skill,
         scenario: effectiveScenario,
         cwd: sandbox.path,
-        firstUserMessage,
+        userMessages,
         skillInstallRelPath: sandbox.skillInstallPath,
         userResponses: effectiveScenario.user_responses,
         onProgress: opts.quiet ? undefined : printProgressEvent,
@@ -263,18 +270,23 @@ function syntheticSkillRecord(loaded: LoadedScenario, body: string): SkillRecord
   };
 }
 
-function buildFirstUserMessage(loaded: LoadedScenario, skill: SkillRecord): string {
-  const argument = loaded.scenario.argument;
+function buildUserMessageChain(loaded: LoadedScenario, skill: SkillRecord): string[] {
+  const { scenario } = loaded;
+  if (scenario.user_prompts && scenario.user_prompts.length > 0) {
+    return scenario.user_prompts;
+  }
+  if (scenario.user_prompt) return [scenario.user_prompt];
+  const argument = scenario.argument;
   const argLine = argument && argument.length > 0 ? `\nArgument: ${argument}` : "";
-  if (loaded.scenario.skill) {
-    return (
+  if (scenario.skill) {
+    return [
       `Run the ${skill.name} skill defined in your system prompt. Follow its ` +
-      `instructions end-to-end against the current working directory.` +
-      argLine
-    );
+        `instructions end-to-end against the current working directory.` +
+        argLine,
+    ];
   }
   // Inline prompt — simpler kickoff; the system prompt already holds the instructions.
-  return argument && argument.length > 0 ? argument : "Begin.";
+  return [argument && argument.length > 0 ? argument : "Begin."];
 }
 
 
@@ -372,6 +384,17 @@ function printScenarioDryRun(loaded: LoadedScenario, indent: string = ""): void 
     }`
   );
   console.log(`${indent}    argument:       ${scenario.argument ?? chalk.dim("(none)")}`);
+  if (scenario.user_prompt) {
+    const preview = scenario.user_prompt.replaceAll("\n", " | ").slice(0, 100);
+    console.log(`${indent}    user_prompt:    ${preview}${scenario.user_prompt.length > 100 ? "…" : ""}`);
+  }
+  if (scenario.user_prompts && scenario.user_prompts.length > 0) {
+    console.log(`${indent}    user_prompts:   ${scenario.user_prompts.length} scripted turn(s)`);
+    for (const [i, p] of scenario.user_prompts.entries()) {
+      const preview = p.replaceAll("\n", " | ").slice(0, 100);
+      console.log(`${indent}      [${i + 1}] ${preview}${p.length > 100 ? "…" : ""}`);
+    }
+  }
   console.log(
     `${indent}    fixtures:       ${scenario.fixtures.files_committed.length} committed, ` +
       `${scenario.fixtures.files_staged.length} staged, ` +

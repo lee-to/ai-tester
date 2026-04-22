@@ -29,13 +29,19 @@ export type ProgressEvent =
     }
   | { kind: "result"; subtype: string | null; usdEstimate: number; elapsedMs: number }
   | { kind: "stderr"; chunk: string; elapsedMs: number }
+  | { kind: "scripted_prompt"; step: number; total: number; text: string; elapsedMs: number }
   | { kind: "idle_warning"; secondsSinceLastEvent: number };
 
 export interface RuntimeRunRequest {
   skill: SkillRecord;
   scenario: Scenario;
   cwd: string;
-  firstUserMessage: string;
+  /**
+   * Ordered list of scripted user turns. The first entry kicks off the
+   * session; each subsequent entry is delivered after the agent finishes
+   * its previous turn (end_turn). Always contains at least one entry.
+   */
+  userMessages: string[];
   skillInstallRelPath: string | null;
   userResponses: UserResponseEntry[];
   onProgress?: (event: ProgressEvent) => void;

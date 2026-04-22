@@ -36,7 +36,7 @@ export function createClaudeRuntime(): RuntimeAdapter {
         skill: req.skill,
         scenario: req.scenario,
         cwd: req.cwd,
-        firstUserMessage: req.firstUserMessage,
+        userMessages: req.userMessages,
         skillInstallRelPath: req.skillInstallRelPath,
         onProgress: req.onProgress,
         idleWarnSeconds: req.idleWarnSeconds,
