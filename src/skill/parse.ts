@@ -21,6 +21,14 @@ export async function parseSkillMd(filePath: string): Promise<ParsedSkillFile> {
       `SKILL.md at ${filePath} missing required frontmatter (name, description).`
     );
   }
+  const budget = frontmatter["token-budget"];
+  if (budget !== undefined) {
+    if (typeof budget !== "number" || !Number.isFinite(budget) || budget <= 0) {
+      throw new Error(
+        `SKILL.md at ${filePath} has invalid \`token-budget\`: must be a positive number.`
+      );
+    }
+  }
   const body = parsed.content;
   const bodyHash = createHash("sha256").update(body).digest("hex");
   return { frontmatter, body, bodyHash };

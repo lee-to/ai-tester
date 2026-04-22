@@ -125,7 +125,7 @@ export const AssertionSchema = z.discriminatedUnion("type", [
   AssertionNoPathEscape,
 ]);
 
-export const ScenarioSchema = z
+const ScenarioShape = z
   .object({
     scenario: z.string().min(1),
     description: z.string().optional(),
@@ -145,11 +145,30 @@ export const ScenarioSchema = z
      * a warning but does not fail the scenario.
      */
     max_turns: z.number().int().positive().optional(),
+    /**
+     * Hard cap on total tokens (input + output + cache-creation + cache-read)
+     * for this scenario. Overrides the skill-level `token-budget` from SKILL.md
+     * when both are set. Exceeding it fails the implicit `token_budget`
+     * assertion.
+     */
+    token_budget: z.number().positive().optional(),
     runner: Runner.prefault({}),
     fixtures: Fixtures.prefault({}),
     user_responses: z.array(UserResponse).default([]),
     assertions: z.array(AssertionSchema).default([]),
-  })
+  });
+
+export const ScenarioSchema = z
+  .preprocess((input) => {
+    if (input && typeof input === "object" && !Array.isArray(input)) {
+      const obj = input as Record<string, unknown>;
+      if ("token-budget" in obj && !("token_budget" in obj)) {
+        const { ["token-budget"]: v, ...rest } = obj;
+        return { ...rest, token_budget: v };
+      }
+    }
+    return input;
+  }, ScenarioShape)
   .refine(
     (data) => {
       const count =

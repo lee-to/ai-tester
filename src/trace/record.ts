@@ -54,11 +54,13 @@ export function buildTraceRecord(params: BuildRecordParams): TraceRecord {
       bodyHash: skill.bodyHash,
       allowedToolsParsed: skill.allowedTools,
       allowedToolsRaw: skill.allowedToolsRaw,
+      tokenBudget: skill.frontmatter["token-budget"] ?? null,
     },
     scenario: {
       name: scenario.scenario,
       path: relativize(scenarioPath),
       argument: scenario.argument ?? null,
+      tokenBudget: scenario.token_budget ?? null,
     },
     runner: {
       model: scenario.runner.model,

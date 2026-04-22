@@ -35,6 +35,8 @@ export function evaluateAssertions(
     }
   }
   results.push(evaluateNoUnansweredQuestions(trace));
+  const budget = evaluateTokenBudget(trace);
+  if (budget) results.push(budget);
   return results;
 }
 
@@ -53,5 +55,30 @@ function evaluateNoUnansweredQuestions(trace: TraceRecord): AssertionResult {
     detail: pass
       ? "all AskUserQuestion calls had matching user_responses entries"
       : `${unanswered} AskUserQuestion call(s) had no matching user_responses — add entries or tighten match_question regex`,
+  };
+}
+
+/**
+ * Implicit assertion: if the scenario or its skill declares `token_budget` /
+ * `token-budget`, the run must not exceed it. Scenario wins over skill.
+ * Only emitted when one of them sets a budget.
+ */
+function evaluateTokenBudget(trace: TraceRecord): AssertionResult | null {
+  const fromScenario = trace.scenario.tokenBudget;
+  const fromSkill = trace.skill.tokenBudget;
+  const budget = fromScenario ?? fromSkill;
+  if (budget == null) return null;
+  const source = fromScenario != null ? "scenario" : "skill";
+  const { inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens } = trace.cost;
+  const total = inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens;
+  const pass = total <= budget;
+  return {
+    id: "token_budget",
+    type: "token_budget",
+    pass,
+    weight: 1,
+    detail: pass
+      ? `${total.toLocaleString("en-US")} tokens ≤ ${source} budget of ${budget.toLocaleString("en-US")}`
+      : `${total.toLocaleString("en-US")} tokens exceeds ${source} \`token_budget\` of ${budget.toLocaleString("en-US")} (input=${inputTokens}, output=${outputTokens}, cache-creation=${cacheCreationTokens}, cache-read=${cacheReadTokens})`,
   };
 }

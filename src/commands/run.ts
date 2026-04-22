@@ -50,6 +50,12 @@ export async function runCommand(opts: RunOptions): Promise<number> {
   let failed = 0;
   let runtimeErrors = 0;
   let totalUsd = 0;
+  const totalTokens = {
+    input: 0,
+    output: 0,
+    cacheCreation: 0,
+    cacheRead: 0,
+  };
 
   console.log(chalk.bold("=== ai-tester ==="));
   console.log();
@@ -162,6 +168,10 @@ export async function runCommand(opts: RunOptions): Promise<number> {
 
       tracePath = await writeTrace(record);
       totalUsd += record.cost.usdEstimate;
+      totalTokens.input += record.cost.inputTokens;
+      totalTokens.output += record.cost.outputTokens;
+      totalTokens.cacheCreation += record.cost.cacheCreationTokens;
+      totalTokens.cacheRead += record.cost.cacheReadTokens;
 
       if (loop.errors.length > 0) runtimeErrors++;
       else if (record.scoring.overallPass) passed++;
@@ -186,6 +196,7 @@ export async function runCommand(opts: RunOptions): Promise<number> {
     dispatcherErrors: runtimeErrors,
     totalUsd,
     durationMs: Date.now() - startOfRun,
+    tokens: totalTokens,
   });
 
   if (failed > 0) return 1;

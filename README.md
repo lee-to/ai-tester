@@ -23,6 +23,7 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 - **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML.
 - **First-class fixtures.** Inline strings, file-backed `content_from`, or whole directory trees via `copy_trees` — perfect for testing skills against a realistic repo.
 - **Deterministic traces.** Every run writes a JSON trace with turns, tool calls, assertions, scoring, and cost — replay / diff / compare later.
+- **Token accounting & budgets.** Per-run totals in `=== Results ===` and a declarative `token_budget` (in SKILL.md or in the scenario YAML) that fails the scenario when exceeded. See [Token consumption & budgets](#token-consumption--budgets).
 - **Safe sandboxing.** Automatic cleanup on exit or SIGINT/SIGTERM/SIGHUP, plus `ai-tester sandbox-prune` for the `kill -9` cases.
 - **Security guardrails.** Declarative rules catch external calls (`WebFetch`/`WebSearch`), covert shell networking (`curl`/`ssh`/`git push`), path escapes, and dotfile reads — before a skill ships. See [Skill security checks](#skill-security-checks).
 - **Zero provider API keys.** Runs bill against your logged-in Claude Max/Pro or ChatGPT subscription. `OPENAI_API_KEY` is an optional fallback for Codex.
@@ -508,6 +509,7 @@ All file-path tool calls stayed inside the sandbox (or explicitly allowed prefix
 
 - **`no_unanswered_questions`** — every `AskUserQuestion` question had a matching `user_responses` entry. If the skill asks a new question the scenario didn't anticipate, this fires. Fix: add an entry or widen `match_question`.
 - **`turn_budget`** — fires only when `max_turns` is set explicitly AND the SDK stopped with subtype `error_max_turns`. See "Turn budget" below.
+- **`token_budget`** — fires only when the scenario (`token_budget: <N>`) or its skill (`token-budget: <N>` in SKILL.md) declares a budget and the run's `input + output + cache-creation + cache-read` exceeds it. Scenario wins over skill. See [Token consumption & budgets](#token-consumption--budgets).
 
 ### Regex semantics
 
@@ -722,6 +724,55 @@ The trace includes:
 - `errors[]` — SDK / dispatcher / stream errors
 
 `runs/` and `cache/` are gitignored. Old runs accumulate until you delete them manually — there is no automatic retention (yet).
+
+---
+
+## Token consumption & budgets
+
+Every run's `cost` block records `inputTokens`, `outputTokens`, `cacheCreationTokens`, and `cacheReadTokens`. The runner aggregates these across scenarios and prints them in the final `=== Results ===` block alongside the USD estimate:
+
+```
+=== Results ===
+  Scenarios:         3
+  Passed:            2
+  Failed:            1
+  Duration:          42.1s
+  Total tokens:      128,431
+    input:           12,345
+    output:          5,678
+    cache-creation:  45,678
+    cache-read:      64,730 (84% of billable input)
+  Estimated cost:    ~$0.1234
+```
+
+> **Runtime coverage.** Claude populates all four token fields. Codex SDK only reports `input`, `output`, and `cached_input` — so `cache-creation` is always `0` on Codex runs and the USD estimate isn't emitted by the SDK (stays `~$0.0000`). Aggregation still works correctly; it's a property of the upstream SDK, not the harness.
+
+### Token budget
+
+Declare a ceiling in two places — scenario wins over skill when both are set.
+
+**Per skill** (applies to every scenario that tests this skill) — in `SKILL.md` frontmatter:
+
+```yaml
+---
+name: my-skill
+description: ...
+allowed-tools: Read, Write, Bash(git *)
+token-budget: 50000     # total tokens (input + output + cache-creation + cache-read)
+---
+```
+
+**Per scenario** (overrides the skill value) — in the scenario YAML:
+
+```yaml
+scenario: fast-path
+skill: my-skill
+token_budget: 10000     # snake_case preferred; `token-budget: 10000` is also accepted
+```
+
+When set, the implicit `token_budget` assertion runs after every scenario. If the total exceeds the budget the scenario fails with a red line showing the actual spend and the limit — same contract as any other assertion, so CI breaks on regressions. The trace stores both `scenario.tokenBudget` and `skill.tokenBudget` so you can see where the effective budget came from.
+
+Omit the field and nothing changes — skills/scenarios without a budget behave exactly as before.
 
 ---
 

@@ -177,7 +177,19 @@ export function printFinalSummary(params: {
   dispatcherErrors: number;
   totalUsd: number;
   durationMs: number;
+  tokens: {
+    input: number;
+    output: number;
+    cacheCreation: number;
+    cacheRead: number;
+  };
 }): void {
+  const { tokens } = params;
+  const totalTokens =
+    tokens.input + tokens.output + tokens.cacheCreation + tokens.cacheRead;
+  const billableIn = tokens.input + tokens.cacheCreation + tokens.cacheRead;
+  const cachePct = billableIn === 0 ? 0 : Math.round((tokens.cacheRead / billableIn) * 100);
+
   console.log(chalk.bold("=== Results ==="));
   console.log(`  Scenarios:         ${params.scenarios}`);
   console.log(`  Passed:            ${chalk.green(String(params.passed))}`);
@@ -186,6 +198,15 @@ export function printFinalSummary(params: {
     `  Dispatcher errors: ${params.dispatcherErrors > 0 ? chalk.red(String(params.dispatcherErrors)) : "0"}`
   );
   console.log(`  Duration:          ${(params.durationMs / 1000).toFixed(1)}s`);
+  console.log(`  Total tokens:      ${formatTokens(totalTokens)}`);
+  console.log(
+    chalk.dim(
+      `    input:           ${formatTokens(tokens.input)}\n` +
+        `    output:          ${formatTokens(tokens.output)}\n` +
+        `    cache-creation:  ${formatTokens(tokens.cacheCreation)}\n` +
+        `    cache-read:      ${formatTokens(tokens.cacheRead)} (${cachePct}% of billable input)`
+    )
+  );
   console.log(`  Estimated cost:    ~$${params.totalUsd.toFixed(4)}`);
   console.log();
   if (params.failed > 0 || params.dispatcherErrors > 0) {
@@ -195,6 +216,10 @@ export function printFinalSummary(params: {
   } else {
     console.log(chalk.green("PASS"));
   }
+}
+
+function formatTokens(n: number): string {
+  return n.toLocaleString("en-US");
 }
 
 function computeCachePct(record: TraceRecord): number {

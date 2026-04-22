@@ -14,6 +14,8 @@ export interface SkillFrontmatter {
   "allowed-tools"?: string;
   "disable-model-invocation"?: boolean;
   version?: string;
+  /** Max total tokens (input+output+cache) the skill is allowed to consume per run. */
+  "token-budget"?: number;
 }
 
 export interface SkillRecord {
@@ -81,11 +83,13 @@ export interface TraceRecord {
     bodyHash: string;
     allowedToolsParsed: ParsedTool[];
     allowedToolsRaw: string[];
+    tokenBudget: number | null;
   };
   scenario: {
     name: string;
     path: string;
     argument: string | null;
+    tokenBudget: number | null;
   };
   runner: {
     model: string;
