@@ -7,10 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-22
+
 ### Added
 
 - **Assertion `capture` field.** `tool_called` and `tool_call_sequence` specs now accept `capture: [<field>, …]` (plus optional `capture_max_chars: <n>`, default 2000). On pass, the named input fields of the matched tool call are echoed under the assertion line in `=== Results ===` as a dim pipe-quoted block with a `truncated, showing X/Y chars` annotation when capped. Full untruncated values are persisted to `assertions[].captures` in the JSON trace. Handy for inspecting what the agent actually wrote (e.g. the body of `Write(.ai-factory/PLAN.md)`) without opening the raw trace.
-- **`runner.setting_sources` (Claude-only).** Opt-in per scenario for loading user/project/local Claude settings — hooks, MCP servers, user-level skills. Values: `user`, `project`, `local` (maps 1:1 to the SDK's `settingSources`). Default (omitted) keeps runs hermetic — no user config leaks into the sandbox. Use when you specifically need parity with the interactive `claude` CLI (e.g. regression-testing a `PreToolUse` hook or a project-local MCP server).
+- **`runner.setting_sources` (Claude-only).** Opt-in per scenario for loading user/project/local Claude settings — hooks, MCP servers, user-level skills. Values: `user`, `project`, `local` (maps 1:1 to the SDK's `settingSources`). Default (omitted) keeps runs hermetic — no user config leaks into the sandbox. Use when you specifically need parity with the interactive `claude` CLI (e.g. regression-testing a `PreToolUse` hook or a project-local MCP server). Caveat: enabling `user` loads whatever is in `~/.claude/settings.json` on the running machine — hooks that block tools (e.g. `AskUserQuestion`) will break `user_responses`-based flows.
 
 ## [0.3.0] - 2026-04-22
 
@@ -66,7 +68,8 @@ Initial public release.
 - Live progress reporter with idle-warning (`--idle-warn`) and `--quiet` mode.
 - Weighted scoring (`scoring.weightedScore`) for future trend analysis.
 
-[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.4.0
 [0.3.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.3.0
 [0.2.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.2.0
 [0.1.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.1.0
