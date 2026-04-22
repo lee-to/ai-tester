@@ -62,6 +62,16 @@ const Runner = z.object({
     .enum(["acceptEdits", "bypassPermissions", "plan", "default"])
     .default("bypassPermissions"),
   allowed_tools_override: z.array(z.string()).optional(),
+  /**
+   * Claude-only. When set, the Claude Agent SDK loads hooks, MCP servers,
+   * and skills from the specified Claude settings sources. Default (unset)
+   * keeps the run hermetic — no user/project settings leak into the sandbox.
+   * Pass e.g. `[user, project]` to mirror the interactive `claude` CLI.
+   * Values correspond to the SDK's `settingSources` option.
+   */
+  setting_sources: z
+    .array(z.enum(["user", "project", "local"]))
+    .optional(),
 });
 
 const AssertionBase = {
@@ -75,6 +85,14 @@ const AssertionToolCalled = z.object({
   tool: z.string().min(1),
   args_match: ArgsMatch,
   call_index: z.number().int().nonnegative().optional(),
+  /**
+   * On pass, echo these input fields of the matched tool call into the
+   * assertion detail (console + trace). Useful for eyeballing what the
+   * agent actually wrote / queried without opening the raw trace.
+   */
+  capture: z.array(z.string().min(1)).optional(),
+  /** Per-field truncation cap for `capture`. Default 2000. */
+  capture_max_chars: z.number().int().positive().optional(),
 });
 
 const AssertionToolSequence = z.object({
@@ -85,9 +103,13 @@ const AssertionToolSequence = z.object({
       z.object({
         tool: z.string().min(1),
         args_match: ArgsMatch,
+        /** Same as on `tool_called` — echo these fields of the matched call. */
+        capture: z.array(z.string().min(1)).optional(),
       })
     )
     .min(1),
+  /** Per-field truncation cap for any step's `capture`. Default 2000. */
+  capture_max_chars: z.number().int().positive().optional(),
 });
 
 const AssertionNoToolCalled = z.object({

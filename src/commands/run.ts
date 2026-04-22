@@ -376,6 +376,11 @@ function printScenarioDryRun(loaded: LoadedScenario, indent: string = ""): void 
   console.log(`${indent}    runtime:        ${scenario.runner.runtime}`);
   console.log(`${indent}    model:          ${scenario.runner.model}`);
   console.log(`${indent}    permission:     ${scenario.runner.permission_mode}`);
+  if (scenario.runner.setting_sources && scenario.runner.setting_sources.length > 0) {
+    console.log(
+      `${indent}    setting_sources: ${scenario.runner.setting_sources.join(", ")}`
+    );
+  }
   console.log(
     `${indent}    max_turns:      ${
       typeof scenario.max_turns === "number"

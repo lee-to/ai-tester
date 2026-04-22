@@ -1,11 +1,21 @@
 import type { AssertionResult, TraceRecord } from "../types.js";
-import { collectToolCalls, argsMatchInput, summarizeCall } from "./helpers.js";
+import {
+  collectToolCalls,
+  argsMatchInput,
+  summarizeCall,
+  captureFields,
+} from "./helpers.js";
 
 export interface ToolCallSequenceSpec {
   id: string;
   type: "tool_call_sequence";
-  sequence: Array<{ tool: string; args_match?: Record<string, string> }>;
+  sequence: Array<{
+    tool: string;
+    args_match?: Record<string, string>;
+    capture?: string[];
+  }>;
   weight?: number;
+  capture_max_chars?: number;
 }
 
 export function evaluateToolCallSequence(
@@ -14,6 +24,7 @@ export function evaluateToolCallSequence(
 ): AssertionResult {
   const calls = collectToolCalls(trace);
   let cursor = 0;
+  const captures: NonNullable<AssertionResult["captures"]> = [];
   for (let step = 0; step < spec.sequence.length; step++) {
     const want = spec.sequence[step]!;
     let found = -1;
@@ -37,6 +48,10 @@ export function evaluateToolCallSequence(
           ` after position ${cursor}. Matched so far: [${matched || "nothing"}]`,
       };
     }
+    const matchedCall = calls[found]!;
+    captures.push(
+      ...captureFields(matchedCall.input, want.capture, spec.capture_max_chars, step + 1)
+    );
     cursor = found + 1;
   }
   return {
@@ -45,6 +60,7 @@ export function evaluateToolCallSequence(
     pass: true,
     weight: spec.weight ?? 1,
     detail: `matched all ${spec.sequence.length} step(s)`,
+    ...(captures.length > 0 ? { captures } : {}),
   };
 }
 

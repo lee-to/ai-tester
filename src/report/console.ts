@@ -137,6 +137,7 @@ export function printScenarioResult(record: TraceRecord, tracePath: string): voi
     const line = `    ${m} ${a.id}`;
     const detail = a.detail ? chalk.dim(`  — ${a.detail}`) : "";
     console.log(line + detail);
+    if (a.captures && a.captures.length > 0) printCaptures(a.captures);
   }
 
   // Turn-budget line: failure only when user explicitly set max_turns and we
@@ -229,6 +230,26 @@ export function printFinalSummary(params: {
 
 function formatTokens(n: number): string {
   return n.toLocaleString("en-US");
+}
+
+function printCaptures(
+  captures: NonNullable<AssertionResult["captures"]>
+): void {
+  for (const c of captures) {
+    const header =
+      (c.step !== undefined ? `[step ${c.step}] ` : "") +
+      `${c.field}` +
+      (c.truncated
+        ? chalk.dim(
+            ` (truncated, showing ${c.value.length}/${c.originalLength} chars — full value in trace)`
+          )
+        : chalk.dim(` (${c.originalLength} chars)`));
+    console.log(chalk.dim(`        ${header}:`));
+    const body = c.value.length > 0 ? c.value : chalk.dim("(empty)");
+    for (const l of String(body).split("\n")) {
+      console.log(chalk.dim("        │ ") + l);
+    }
+  }
 }
 
 function computeCachePct(record: TraceRecord): number {

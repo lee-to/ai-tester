@@ -69,6 +69,20 @@ export interface AssertionResult {
   score?: number;
   minScore?: number;
   rationale?: string;
+  /**
+   * Populated when a `tool_called` / `tool_call_sequence` assertion matches
+   * and the spec included `capture: [<field>, ...]`. Each entry echoes the
+   * captured input field value from the matched tool call. Displayed under
+   * the assertion line in the console and persisted verbatim in the trace.
+   */
+  captures?: Array<{
+    field: string;
+    value: string;
+    truncated: boolean;
+    originalLength: number;
+    /** For `tool_call_sequence`, which step in the sequence captured this. */
+    step?: number;
+  }>;
 }
 
 export interface TraceRecord {

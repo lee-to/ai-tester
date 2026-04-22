@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Assertion `capture` field.** `tool_called` and `tool_call_sequence` specs now accept `capture: [<field>, …]` (plus optional `capture_max_chars: <n>`, default 2000). On pass, the named input fields of the matched tool call are echoed under the assertion line in `=== Results ===` as a dim pipe-quoted block with a `truncated, showing X/Y chars` annotation when capped. Full untruncated values are persisted to `assertions[].captures` in the JSON trace. Handy for inspecting what the agent actually wrote (e.g. the body of `Write(.ai-factory/PLAN.md)`) without opening the raw trace.
+- **`runner.setting_sources` (Claude-only).** Opt-in per scenario for loading user/project/local Claude settings — hooks, MCP servers, user-level skills. Values: `user`, `project`, `local` (maps 1:1 to the SDK's `settingSources`). Default (omitted) keeps runs hermetic — no user config leaks into the sandbox. Use when you specifically need parity with the interactive `claude` CLI (e.g. regression-testing a `PreToolUse` hook or a project-local MCP server).
+
 ## [0.3.0] - 2026-04-22
 
 ### Added

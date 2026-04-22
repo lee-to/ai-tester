@@ -19,9 +19,10 @@ No mocks. No provider API keys for the primary runtimes (it reuses your logged-i
 
 - **Real runs, real tools.** Each scenario executes inside an isolated `git` worktree under `$TMPDIR`. Reads, writes, edits, shell commands — all hit the sandbox filesystem.
 - **Multi-runtime.** Claude (via `@anthropic-ai/claude-agent-sdk`) and OpenAI Codex (via `@openai/codex-sdk`) out of the box. A single `RuntimeAdapter` interface makes adding new ones a one-file job.
+- **Hermetic by default, opt-in CLI parity.** Hooks, user-level MCP servers, and `~/.claude/skills/` are **not** auto-loaded, so runs are reproducible across machines. Flip `runner.setting_sources: [user, project]` on a scenario when you *do* want to exercise your real Claude configuration. See [SDK vs CLI parity](#sdk-vs-cli-parity-runnersetting_sources).
 - **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file — same runner, same assertions.
 - **Scripted user turns.** Override the kickoff with `user_prompt` for a custom opening message, or `user_prompts` for a warm-up → real-request chain delivered in a single agent session.
-- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML.
+- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML. Add `capture: [<field>]` to echo matched tool-call inputs back into the report for eyeball-debugging.
 - **First-class fixtures.** Inline strings, file-backed `content_from`, or whole directory trees via `copy_trees` — perfect for testing skills against a realistic repo.
 - **Deterministic traces.** Every run writes a JSON trace with turns, tool calls, assertions, scoring, and cost — replay / diff / compare later.
 - **Token accounting & budgets.** Per-run totals in `=== Results ===`, a per-skill `token-budget` in SKILL.md that fails the scenario when exceeded, and `ai-tester history` for browsing token spend across past runs. See [Run history & token consumption](#run-history--token-consumption).
@@ -273,6 +274,7 @@ runner:
     - Read
     - Write
     - Bash(git *)
+  # setting_sources: [user, project]      # optional, Claude-only. See "SDK vs CLI parity" below.
 
 fixtures:                                 # see "Fixtures" section
   git_init: true
@@ -475,6 +477,20 @@ A tool call with the given name exists in the trace (and optionally matches argu
     command: "^git status"
 ```
 
+On pass, echo selected input fields back into the report via `capture:` — handy for eyeballing what the agent actually wrote or queried without opening the raw trace:
+
+```yaml
+- id: writes-plan-md-path
+  type: tool_called
+  tool: Write
+  args_match:
+    file_path: "\\.ai-factory/PLAN\\.md$"
+  capture: [content]              # any field of the matched tool call's input
+  capture_max_chars: 3000         # optional; default 2000. Trace stores full value regardless.
+```
+
+The reporter prints each captured field under the assertion line as a dim pipe-quoted block and annotates whether it was truncated (e.g. `content (truncated, showing 2000/8423 chars — full value in trace)`). The untruncated value is always persisted under `assertions[].captures` in the JSON trace.
+
 ### `tool_call_sequence`
 
 Ordered list of tool calls, not necessarily contiguous in the trace.
@@ -490,7 +506,9 @@ Ordered list of tool calls, not necessarily contiguous in the trace.
     - tool: Write
       args_match:
         file_path: "\\.ai-factory/PLAN\\.md$"
+      capture: [content]           # `capture:` works per-step; output tags each with its step index
   weight: 2                        # optional — weight this chain heavier for the score
+  capture_max_chars: 3000          # optional cap applied to all steps
 ```
 
 ### `no_tool_called`
@@ -736,6 +754,31 @@ The shared `RuntimeRunRequest` / `RuntimeRunResult` / `ProgressEvent` shapes liv
 - **Set explicitly** — the cap becomes a hard budget. Hitting it fails the scenario with `✗ turn_budget`.
 
 For an independent check regardless of the hard cap, use the `turn_count_at_most` assertion.
+
+---
+
+## SDK vs CLI parity (`runner.setting_sources`)
+
+Running a skill through the harness uses the same Claude Agent SDK that powers the interactive `claude` CLI — the tool-call loop, built-in tools (`Bash` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `WebFetch` / `WebSearch` / `AskUserQuestion` / `Skill` / `Task`), and permission-mode semantics are identical.
+
+**What differs by default (intentional, for hermetic tests):**
+
+- **User hooks** from `~/.claude/settings.json` (`PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` / …) are **not** fired.
+- **User-level MCP servers** configured in `~/.claude/mcp.json` are **not** connected.
+- **User-level skills** under `~/.claude/skills/` are **not** discoverable. Only the skill being tested is installed (we copy it to `<sandbox>/.claude/skills/<name>/` and append its body to the system prompt).
+
+This keeps scenarios deterministic — a stray hook or missing MCP server in your dev machine doesn't turn a green run red on a teammate's box.
+
+**Opt in per scenario** when you *do* want that parity — e.g. you're specifically regression-testing a `PreToolUse` hook or a project-local MCP server:
+
+```yaml
+runner:
+  setting_sources: [user, project]    # Claude-only; Codex ignores this.
+```
+
+Valid values: `user`, `project`, `local` (maps 1:1 to the Claude Agent SDK's `settingSources` option). Omit or leave empty for the hermetic default.
+
+**Caveat.** Enabling `user` loads whatever is in `~/.claude/settings.json` on the machine that runs the test — a hook that writes outside the sandbox or an MCP server that calls external APIs can break isolation. Use sparingly and prefer `project` when the config is committed alongside the code under test.
 
 ---
 

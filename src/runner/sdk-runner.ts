@@ -1,5 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import type { SDKUserMessage, Options } from "@anthropic-ai/claude-agent-sdk";
+import type { SDKUserMessage, Options, SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Scenario } from "../scenario/schema.js";
 import type { SkillRecord, Turn, ToolCallRecord } from "../types.js";
 import { compilePattern } from "../util/regex.js";
@@ -65,6 +65,9 @@ export async function runWithSdk(params: SdkRunParams): Promise<SdkRunResult> {
     },
     ...(skill.allowedToolsRaw.length > 0
       ? { allowedTools: scenario.runner.allowed_tools_override ?? skill.allowedToolsRaw }
+      : {}),
+    ...(scenario.runner.setting_sources && scenario.runner.setting_sources.length > 0
+      ? { settingSources: scenario.runner.setting_sources as SettingSource[] }
       : {}),
   };
 
