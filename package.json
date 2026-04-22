@@ -1,6 +1,6 @@
 {
   "name": "@cutcode/ai-tester",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Behavioral test harness for Claude Code skills and bare prompts. Multi-runtime (Claude, Codex) with real tools in an isolated git sandbox.",
   "keywords": [
     "claude",
