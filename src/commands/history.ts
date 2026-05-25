@@ -20,6 +20,7 @@ interface HistoryEntry {
   overallPass: boolean;
   durationMs: number;
   turnsUsed: number;
+  toolCallsTotal: number;
   tokensTotal: number;
   tokens: {
     input: number;
@@ -98,13 +99,14 @@ export async function historyCommand(opts: HistoryOptions): Promise<number> {
     const label = `${e.skill}/${e.scenario}`;
     const when = formatWhen(e.finishedAt);
     const dur = formatDuration(e.durationMs);
+    const tools = e.toolCallsTotal.toLocaleString("en-US");
     const tok = e.tokensTotal.toLocaleString("en-US");
     const cost = e.usdEstimate > 0 ? `~$${e.usdEstimate.toFixed(4)}` : chalk.dim("—");
     const budget = e.tokenBudget != null ? `/${e.tokenBudget.toLocaleString("en-US")}` : "";
     const budgetTag = e.budgetExceeded ? chalk.red(" over-budget") : "";
     console.log(
       `  ${mark} ${chalk.dim(when)}  ${label.padEnd(44)} ` +
-        chalk.dim(`${dur.padStart(6)}  ${e.turnsUsed}t  `) +
+        chalk.dim(`${dur.padStart(6)}  ${e.turnsUsed}t  ${tools} calls  `) +
         `${tok}${budget} tok  ${cost}${budgetTag}`
     );
     if (!e.overallPass && e.errorCount > 0) {
@@ -114,11 +116,13 @@ export async function historyCommand(opts: HistoryOptions): Promise<number> {
 
   console.log();
   const totalTokens = shown.reduce((s, e) => s + e.tokensTotal, 0);
+  const totalTools = shown.reduce((s, e) => s + e.toolCallsTotal, 0);
   const totalUsd = shown.reduce((s, e) => s + e.usdEstimate, 0);
   const passed = shown.filter((e) => e.overallPass).length;
   console.log(
     chalk.dim(
       `  Σ ${shown.length} run(s), ${passed} pass, ${shown.length - passed} fail, ` +
+        `${totalTools.toLocaleString("en-US")} tool calls, ` +
         `${totalTokens.toLocaleString("en-US")} tokens, ~$${totalUsd.toFixed(4)}`
     )
   );
@@ -144,6 +148,7 @@ function toEntry(rec: TraceRecord, filePath: string): HistoryEntry {
     overallPass: rec.scoring.overallPass,
     durationMs: rec.runner.durationMs,
     turnsUsed: rec.runner.turnsUsed,
+    toolCallsTotal: rec.toolCallSummary?.total ?? countToolCalls(rec),
     tokensTotal: total,
     tokens,
     usdEstimate: rec.cost.usdEstimate,
@@ -158,6 +163,10 @@ function formatWhen(iso: string): string {
   if (Number.isNaN(d.getTime())) return iso;
   const pad = (n: number) => n.toString().padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function countToolCalls(rec: TraceRecord): number {
+  return rec.turns.reduce((sum, turn) => sum + (turn.toolCalls?.length ?? 0), 0);
 }
 
 function formatDuration(ms: number): string {

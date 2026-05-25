@@ -1,10 +1,12 @@
 import type { AssertionResult, TraceRecord } from "../types.js";
 import { collectToolCalls, argsMatchInput, summarizeCall } from "./helpers.js";
+import { compilePattern } from "../util/regex.js";
 
 export interface NoToolCalledSpec {
   id: string;
   type: "no_tool_called";
-  tool: string;
+  tool?: string;
+  tool_pattern?: string;
   args_match?: Record<string, string>;
   weight?: number;
 }
@@ -14,8 +16,10 @@ export function evaluateNoToolCalled(
   trace: TraceRecord
 ): AssertionResult {
   const calls = collectToolCalls(trace);
+  const toolRe = spec.tool_pattern ? compilePattern(spec.tool_pattern) : null;
   for (const tc of calls) {
-    if (tc.name !== spec.tool) continue;
+    if (spec.tool && tc.name !== spec.tool) continue;
+    if (toolRe && !toolRe.test(tc.name)) continue;
     if (!argsMatchInput(spec.args_match, tc.input)) continue;
     return {
       id: spec.id,
@@ -30,6 +34,10 @@ export function evaluateNoToolCalled(
     type: "no_tool_called",
     pass: true,
     weight: spec.weight ?? 1,
-    detail: `no matching ${spec.tool} calls found`,
+    detail: `no matching ${toolDescription(spec)} calls found`,
   };
+}
+
+function toolDescription(spec: NoToolCalledSpec): string {
+  return spec.tool ? spec.tool : `/${spec.tool_pattern}/`;
 }

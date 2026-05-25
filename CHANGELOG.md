@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-05-25
+
+### Added
+
+- `no_tool_called` assertions now accept `tool_pattern` as an alternative to exact `tool`, useful for forbidding whole tool families such as `^mcp__`.
+
+### Changed
+
+- `ai-tester history` now shows total tool-call count per run and in the summary aggregate, using the existing `toolCallSummary.total` value stored in traces.
+
 ## [0.4.0] - 2026-04-22
 
 ### Added
@@ -68,7 +78,8 @@ Initial public release.
 - Live progress reporter with idle-warning (`--idle-warn`) and `--quiet` mode.
 - Weighted scoring (`scoring.weightedScore`) for future trend analysis.
 
-[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.5.0
 [0.4.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.4.0
 [0.3.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.3.0
 [0.2.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.2.0

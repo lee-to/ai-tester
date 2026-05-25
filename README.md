@@ -525,6 +525,10 @@ Negative assertion — fails if a matching tool call exists.
   tool: Bash
   args_match:
     command: "^(?!git )"            # negative lookahead: any Bash not starting with `git`
+
+- id: no-mcp-tools
+  type: no_tool_called
+  tool_pattern: "^mcp__"            # match tool names by regex instead of exact name
 ```
 
 ### `output_contains`
@@ -876,17 +880,17 @@ Omit the field and nothing changes — skills/scenarios without a budget behave 
 $ ai-tester history --last 5
 === Run history === (showing 5 of 12)
 
-  ✗ 2026-04-22 10:55  aif-plan/fast-creates-plan-md                 11.6s  1t  0 tok  —
+  ✗ 2026-04-22 10:55  aif-plan/fast-creates-plan-md                 11.6s  1t  0 calls  0 tok  —
       3 error(s); trace: runs/aif-plan/aif-plan__2026-04-22T07-55-20Z__1.0.0__c0544baf.json
-  ✓ 2026-04-22 10:54  aif-plan/fast-creates-plan-md                 1m12s  20t  251,709 tok  ~$0.1782
-  ✓ 2026-04-22 10:49  aif-plan/fast-creates-plan-md                 1m29s  29t  293,271 tok  ~$0.2128
-  ✗ 2026-04-17 19:10  aif-plan/fast-creates-plan-md                 1m19s  1t  420,604 tok  —
-  ✗ 2026-04-17 19:09  aif-plan/fast-creates-plan-md                 10.8s  1t  0 tok  —
+  ✓ 2026-04-22 10:54  aif-plan/fast-creates-plan-md                 1m12s  20t  44 calls  251,709 tok  ~$0.1782
+  ✓ 2026-04-22 10:49  aif-plan/fast-creates-plan-md                 1m29s  29t  61 calls  293,271 tok  ~$0.2128
+  ✗ 2026-04-17 19:10  aif-plan/fast-creates-plan-md                 1m19s  1t  2 calls  420,604 tok  —
+  ✗ 2026-04-17 19:09  aif-plan/fast-creates-plan-md                 10.8s  1t  0 calls  0 tok  —
 
-  Σ 5 run(s), 2 pass, 3 fail, 965,584 tokens, ~$0.3910
+  Σ 5 run(s), 2 pass, 3 fail, 107 tool calls, 965,584 tokens, ~$0.3910
 ```
 
-Columns: ✓/✗, timestamp, `skill/scenario`, duration, turns, total tokens (plus `/<token-budget>` if declared), USD estimate. Scenarios that tripped `token_budget` get a red `over-budget` tag inline.
+Columns: ✓/✗, timestamp, `skill/scenario`, duration, turns, total tool calls, total tokens (plus `/<token-budget>` if declared), USD estimate. Scenarios that tripped `token_budget` get a red `over-budget` tag inline.
 
 Flags:
 

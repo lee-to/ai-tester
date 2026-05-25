@@ -115,8 +115,11 @@ const AssertionToolSequence = z.object({
 const AssertionNoToolCalled = z.object({
   ...AssertionBase,
   type: z.literal("no_tool_called"),
-  tool: z.string().min(1),
+  tool: z.string().min(1).optional(),
+  tool_pattern: z.string().min(1).optional(),
   args_match: ArgsMatch,
+}).refine((a) => Boolean(a.tool) !== Boolean(a.tool_pattern), {
+  message: "no_tool_called assertion must declare exactly one of `tool` or `tool_pattern`",
 });
 
 const AssertionOutputContains = z.object({
