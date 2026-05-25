@@ -59,6 +59,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.90",
+    "@cutcode/ai-tester": "^0.2.0",
     "@openai/codex-sdk": "^0.118.0",
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
