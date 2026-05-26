@@ -5,8 +5,7 @@ use std::process::Command;
 use serde_json::Value;
 
 use crate::scenario::{Scenario, UserResponse};
-use crate::trace::{AnsweredQuestion, ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
-use crate::util::regex::compile_pattern;
+use crate::trace::{ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
 
 pub struct RuntimeStatus {
     pub name: &'static str,
@@ -360,31 +359,13 @@ fn annotate_question_call(
         return;
     }
     let question = question_text(&call.input);
-    if let Some((idx, response)) = matching_user_response(&question, user_responses, out) {
-        call.answered = Some(AnsweredQuestion {
-            matched_entry_index: idx as i32,
-            chosen_label: response.choose.clone(),
-        });
-    } else {
-        out.unanswered_questions += 1;
+    out.unanswered_questions += 1;
+    if !user_responses.is_empty() {
+        out.diagnostics.push(format!(
+            "Claude subprocess adapter cannot deliver user_responses to `{}` question: {}",
+            call.name, question
+        ));
     }
-}
-
-fn matching_user_response<'a>(
-    question: &str,
-    user_responses: &'a [UserResponse],
-    out: &mut RuntimeRunResult,
-) -> Option<(usize, &'a UserResponse)> {
-    for (idx, response) in user_responses.iter().enumerate() {
-        match compile_pattern(&response.match_question) {
-            Ok(pattern) if pattern.is_match(question) => return Some((idx, response)),
-            Ok(_) => {}
-            Err(err) => out.diagnostics.push(format!(
-                "invalid user_responses[{idx}].match_question regex: {err}"
-            )),
-        }
-    }
-    None
 }
 
 fn question_text(input: &Value) -> String {

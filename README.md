@@ -320,7 +320,7 @@ Order of operations:
 
 Implicit assertions:
 
-- `no_unanswered_questions`: every supported question tool call had a matching `user_responses` entry.
+- `no_unanswered_questions`: every supported question tool call must have a delivered answer. The current Claude subprocess adapter cannot deliver `user_responses` interactively, so Claude `AskUserQuestion`/`Questions` calls are treated as unanswered instead of being matched after the process exits.
 - `token_budget`: emitted when a scenario or skill declares a token budget.
 
 ## Regex Semantics

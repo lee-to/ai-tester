@@ -291,7 +291,7 @@ fn claude_jsonl_parser_normalizes_tool_results_and_usage() {
 }
 
 #[test]
-fn claude_jsonl_parser_accounts_for_question_user_responses() {
+fn claude_jsonl_parser_does_not_mark_subprocess_questions_answered() {
     let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q-1","name":"AskUserQuestion","input":{"question":"Proceed with commit?"}}]}}
 {"type":"result","subtype":"success","result":"done"}
 "#;
@@ -301,7 +301,7 @@ fn claude_jsonl_parser_accounts_for_question_user_responses() {
     assert_eq!(unanswered.unanswered_questions, 1);
     assert!(unanswered.turns[0].tool_calls[0].answered.is_none());
 
-    let answered = parse_claude_jsonl_with_user_responses(
+    let unsupported = parse_claude_jsonl_with_user_responses(
         jsonl,
         12,
         false,
@@ -311,12 +311,10 @@ fn claude_jsonl_parser_accounts_for_question_user_responses() {
         }],
     )
     .expect("jsonl parses");
-    assert_eq!(answered.unanswered_questions, 0);
-    assert_eq!(
-        answered.turns[0].tool_calls[0]
-            .answered
-            .as_ref()
-            .map(|answer| answer.chosen_label.as_str()),
-        Some("Yes")
-    );
+    assert_eq!(unsupported.unanswered_questions, 1);
+    assert!(unsupported.turns[0].tool_calls[0].answered.is_none());
+    assert!(unsupported
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.contains("cannot deliver user_responses")));
 }

@@ -263,6 +263,32 @@ fn cli_run_applies_project_defaults_to_omitted_runner_fields() {
 }
 
 #[test]
+fn cli_run_with_fake_claude_question_does_not_false_pass_user_responses() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_claude_question(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: claude-question\nsystem_prompt: You are helpful.\nrunner:\n  runtime: claude\n  model: fake-model\nuser_responses:\n  - match_question: Proceed\n    choose: Yes\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("FAIL no_unanswered_questions"))
+        .stdout(predicate::str::contains("FAIL"));
+}
+
+#[test]
 fn cli_run_discovers_skill_scenarios_and_installs_skill_in_sandbox() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -373,6 +399,35 @@ echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\"
 echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",
         )
         .expect("fake codex written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_claude_question(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let path = bin_dir.join("claude.cmd");
+        fs::write(
+            path,
+            "@echo off\r\n\
+echo {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"q-1\",\"name\":\"AskUserQuestion\",\"input\":{\"question\":\"Proceed with commit?\"}}]}}\r\n\
+echo {\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\r\n",
+        )
+        .expect("fake claude written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("claude");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"q-1\",\"name\":\"AskUserQuestion\",\"input\":{\"question\":\"Proceed with commit?\"}}]}}'\n\
+echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}'\n",
+        )
+        .expect("fake claude written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");

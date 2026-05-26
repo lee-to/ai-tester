@@ -289,9 +289,9 @@ fn evaluate_no_unanswered_questions(trace: &TraceRecord) -> AssertionResult {
         unanswered == 0,
         1.0,
         if unanswered == 0 {
-            "all AskUserQuestion calls had matching user_responses entries".to_string()
+            "no supported question tool calls were left unanswered".to_string()
         } else {
-            format!("{unanswered} AskUserQuestion call(s) had no matching user_responses")
+            format!("{unanswered} question tool call(s) had no delivered answer")
         },
     )
 }
