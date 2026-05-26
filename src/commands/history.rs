@@ -1,0 +1,133 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+
+use crate::trace::TraceRecord;
+
+#[derive(Debug, Clone)]
+pub struct HistoryOptions {
+    pub skill: Option<String>,
+    pub scenario: Option<String>,
+    pub last: usize,
+    pub json: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryEntry {
+    run_id: String,
+    file_path: String,
+    skill: String,
+    scenario: String,
+    finished_at: String,
+    overall_pass: bool,
+    duration_ms: u64,
+    turns_used: u32,
+    tool_calls_total: usize,
+    tokens_total: u64,
+    usd_estimate: f64,
+    token_budget: Option<f64>,
+    budget_exceeded: bool,
+    error_count: usize,
+}
+
+pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
+    let runs_dir = std::env::current_dir()?.join("runs");
+    if !runs_dir.is_dir() {
+        println!("No runs/ directory found - run some scenarios first.");
+        return Ok(0);
+    }
+
+    let mut entries = Vec::new();
+    for path in json_files_under(&runs_dir)? {
+        let raw = fs::read_to_string(&path)?;
+        let record = match serde_json::from_str::<TraceRecord>(&raw) {
+            Ok(record) if record.schema_version == "2.0.0" => record,
+            _ => continue,
+        };
+        if opts
+            .skill
+            .as_ref()
+            .is_some_and(|skill| *skill != record.skill.name)
+        {
+            continue;
+        }
+        if opts
+            .scenario
+            .as_ref()
+            .is_some_and(|scenario| *scenario != record.scenario.name)
+        {
+            continue;
+        }
+        entries.push(to_entry(record, path));
+    }
+
+    entries.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
+    let limit = if opts.last == 0 { 20 } else { opts.last };
+    let shown = entries.into_iter().take(limit).collect::<Vec<_>>();
+
+    if opts.json {
+        println!("{}", serde_json::to_string_pretty(&shown)?);
+        return Ok(0);
+    }
+
+    if shown.is_empty() {
+        println!("No runs matched.");
+        return Ok(0);
+    }
+
+    println!("=== Run history === (showing {})", shown.len());
+    println!();
+    for entry in &shown {
+        let mark = if entry.overall_pass { "OK" } else { "FAIL" };
+        println!(
+            "  {mark} {}  {}/{}  {}t  {} calls  {} tok  ~${:.4}",
+            entry.finished_at,
+            entry.skill,
+            entry.scenario,
+            entry.turns_used,
+            entry.tool_calls_total,
+            entry.tokens_total,
+            entry.usd_estimate
+        );
+    }
+    Ok(0)
+}
+
+fn json_files_under(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "json")
+        {
+            out.push(entry.path().to_path_buf());
+        }
+    }
+    Ok(out)
+}
+
+fn to_entry(record: TraceRecord, path: PathBuf) -> HistoryEntry {
+    let tokens_total = record.cost.total_tokens();
+    let token_budget = record.scenario.token_budget.or(record.skill.token_budget);
+    HistoryEntry {
+        run_id: record.run_id,
+        file_path: path.display().to_string(),
+        skill: record.skill.name,
+        scenario: record.scenario.name,
+        finished_at: record
+            .runner
+            .finished_at
+            .format("%Y-%m-%d %H:%M")
+            .to_string(),
+        overall_pass: record.scoring.overall_pass,
+        duration_ms: record.runner.duration_ms,
+        turns_used: record.runner.turns_used,
+        tool_calls_total: record.tool_call_summary.total,
+        tokens_total,
+        usd_estimate: record.cost.usd_estimate,
+        token_budget,
+        budget_exceeded: token_budget.is_some_and(|budget| tokens_total as f64 > budget),
+        error_count: record.errors.len(),
+    }
+}

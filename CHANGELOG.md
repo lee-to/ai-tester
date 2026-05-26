@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Rewrote `ai-tester` from TypeScript/Node to a native Rust CLI.
+- Removed npm packaging and Node SDK runtime dependencies; runtime adapters now call external `claude` and `codex` CLIs and parse JSONL output.
+- Trace output now uses Rust trace schema `2.0.0`.
+- CI now runs `cargo fmt`, `cargo clippy`, and `cargo test` on Windows, Linux, and macOS.
+
+### Removed
+
+- Removed `package.json`, `package-lock.json`, TypeScript source, Node tests, and npm publish workflow.
+
 ## [0.5.0] - 2026-05-25
 
 ### Added

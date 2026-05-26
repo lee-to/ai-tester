@@ -1,553 +1,309 @@
 # ai-tester
 
-> End-to-end behavioral testing for **skills**, **bare system prompts**, and any **agent runtime** — run real scenarios in an isolated git sandbox, capture the full tool-call trace, and assert it against declarative YAML.
+> End-to-end behavioral testing for **skills**, **bare system prompts**, and agent runtimes. Run real scenarios in an isolated git sandbox, capture normalized tool-call traces, and assert behavior with declarative YAML.
 
-[![npm](https://img.shields.io/npm/v/@cutcode/ai-tester.svg)](https://www.npmjs.com/package/@cutcode/ai-tester)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
-[![node](https://img.shields.io/node/v/@cutcode/ai-tester.svg)](https://nodejs.org)
+[![rust](https://img.shields.io/badge/rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
 [![CI](https://github.com/lee-to/ai-tester/actions/workflows/ci.yml/badge.svg)](https://github.com/lee-to/ai-tester/actions/workflows/ci.yml)
 
 ---
 
 ## Why ai-tester?
 
-LLM tests that mock the model are easy to write and nearly useless in production — the real bugs live in tool-use sequences, permission-mode edge cases, and skill instructions the model actually sees. `ai-tester` spins up a throwaway git worktree per scenario, runs the agent end-to-end with its real tools, records every turn and tool call, and checks the run against declarative YAML assertions.
+LLM tests that mock the model are easy to write and weak at catching production failures. The real bugs show up in tool-use sequences, sandbox behavior, permission-mode differences, and the instructions the model actually sees.
 
-No mocks. No provider API keys for the primary runtimes (it reuses your logged-in `claude` / `codex` CLI sessions). Swap runtimes with a single line.
+`ai-tester` creates a throwaway sandbox per scenario, runs the selected runtime, records every normalized turn and tool call, and evaluates the run against YAML assertions.
 
 ## Features
 
-- **Real runs, real tools.** Each scenario executes inside an isolated `git` worktree under `$TMPDIR`. Reads, writes, edits, shell commands — all hit the sandbox filesystem.
-- **Multi-runtime.** Claude (via `@anthropic-ai/claude-agent-sdk`) and OpenAI Codex (via `@openai/codex-sdk`) out of the box. A single `RuntimeAdapter` interface makes adding new ones a one-file job.
-- **Hermetic by default, opt-in CLI parity.** Hooks, user-level MCP servers, and `~/.claude/skills/` are **not** auto-loaded, so runs are reproducible across machines. Flip `runner.setting_sources: [user, project]` on a scenario when you *do* want to exercise your real Claude configuration. See [SDK vs CLI parity](#sdk-vs-cli-parity-runnersetting_sources).
-- **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file — same runner, same assertions.
-- **Scripted user turns.** Override the kickoff with `user_prompt` for a custom opening message, or `user_prompts` for a warm-up → real-request chain delivered in a single agent session.
-- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, `no_path_escape` — composable in plain YAML. Add `capture: [<field>]` to echo matched tool-call inputs back into the report for eyeball-debugging.
-- **First-class fixtures.** Inline strings, file-backed `content_from`, or whole directory trees via `copy_trees` — perfect for testing skills against a realistic repo.
-- **Deterministic traces.** Every run writes a JSON trace with turns, tool calls, assertions, scoring, and cost — replay / diff / compare later.
-- **Token accounting & budgets.** Per-run totals in `=== Results ===`, a per-skill `token-budget` in SKILL.md that fails the scenario when exceeded, and `ai-tester history` for browsing token spend across past runs. See [Run history & token consumption](#run-history--token-consumption).
-- **Safe sandboxing.** Automatic cleanup on exit or SIGINT/SIGTERM/SIGHUP, plus `ai-tester sandbox-prune` for the `kill -9` cases.
-- **Security guardrails.** Declarative rules catch external calls (`WebFetch`/`WebSearch`), covert shell networking (`curl`/`ssh`/`git push`), path escapes, and dotfile reads — before a skill ships. See [Skill security checks](#skill-security-checks).
-- **Zero provider API keys.** Runs bill against your logged-in Claude Max/Pro or ChatGPT subscription. `OPENAI_API_KEY` is an optional fallback for Codex.
-
-## Quick start
-
-```bash
-# 1. Install
-npm install -g @cutcode/ai-tester
-
-# 2. Create a config at your project root
-ai-tester init
-
-# 3. Check which runtimes are ready on this machine
-ai-tester runtimes
-#   claude  ready  Claude Code via @anthropic-ai/claude-agent-sdk…
-#   codex   ready  OpenAI Codex via @openai/codex-sdk…
-
-# 4. Run every scenario discovered under skills_dir
-ai-tester run
-```
+- **Native Rust CLI.** No Node runtime or embedded SDK dependency.
+- **Real runs, real tools.** Scenarios execute inside an isolated temporary sandbox.
+- **Multi-runtime.** Built-in adapters for Claude Code and OpenAI Codex through their installed CLIs.
+- **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file.
+- **Scripted user turns.** Use `user_prompt` or `user_prompts` for custom session flow.
+- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, and `no_path_escape`.
+- **Fixtures.** Inline files, `content_from`, directory trees, staged changes, committed baselines, and setup commands.
+- **Trace output.** Every live run writes a schema `2.0.0` JSON trace under `runs/`.
+- **History view.** `ai-tester history` summarizes prior v2 traces.
+- **Security checks.** Assertions can forbid web tools, shell networking, path escapes, destructive shell commands, or unexpected tool families.
 
 ## Installation
 
 ```bash
-# Global (recommended for CLI usage)
-npm install -g @cutcode/ai-tester
-
-# Or run without installing
-npx @cutcode/ai-tester run
-
-# Per-project dev dependency
-npm install --save-dev @cutcode/ai-tester
+cargo install ai-tester
 ```
 
-Requires **Node.js 18 or newer**. Building from source? See [CONTRIBUTING.md](./CONTRIBUTING.md).
+Build from source:
 
----
+```bash
+git clone https://github.com/lee-to/ai-tester.git
+cd ai-tester
+cargo build --release
+./target/release/ai-tester --help
+```
+
+Requires Rust **1.82 or newer** when building from source.
 
 ## Prerequisites
 
 Per runtime you plan to use:
 
-- **Claude** (`runtime: claude`, default): `claude` CLI installed and logged in (`claude login`). The Claude Agent SDK spawns the CLI and reuses its OAuth session — runs bill against your Claude Max/Pro subscription quota. Optionally set `CLAUDE_CODE_OAUTH_TOKEN` to override the session token.
-- **Codex** (`runtime: codex`): `codex` CLI installed and logged in (`codex login`). Uses your ChatGPT subscription if logged in, otherwise falls back to `OPENAI_API_KEY`.
+- **Claude** (`runtime: claude`, default): `claude` CLI installed and logged in.
+- **Codex** (`runtime: codex`): `codex` CLI installed and logged in.
 
-Check what's available in your environment:
+Check local readiness:
 
 ```bash
 ai-tester runtimes
-#   claude     ready  Claude Code via @anthropic-ai/claude-agent-sdk…
-#   codex      ready  OpenAI Codex via @openai/codex-sdk…
+#   claude     ready      Claude Code via `claude -p --output-format stream-json`.
+#   codex      ready      OpenAI Codex via `codex exec --json`.
 ```
 
-## Project config: `.ai-tester.yaml`
+## Quick Start
 
-`ai-tester` walks up from the current working directory looking for `.ai-tester.yaml`. The first one found becomes the project root. If none is found, the CLI falls back to `./skills` in `cwd`.
+```bash
+# 1. Create project config
+ai-tester init
+
+# 2. Validate scenarios without calling a runtime
+ai-tester run --dry-run
+
+# 3. Run scenarios discovered under skills_dir
+ai-tester run
+
+# 4. Run one standalone scenario file
+ai-tester run --file ./scenario.yaml --runtime codex
+```
+
+## Project Config
+
+`ai-tester` walks upward from the current working directory looking for `.ai-tester.yaml`. If none is found, it falls back to `./skills` in the current directory.
 
 ```yaml
-# .ai-tester.yaml (at the root of any project that contains skills)
-
-# Where to discover skills. Relative to this config file.
 skills_dir: ./skills
-
-# Defaults applied when a scenario does not override them.
 defaults:
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
 ```
 
-With this file at `my-project/.ai-tester.yaml` and skills at `my-project/skills/<name>/`, you can run `ai-tester` from anywhere inside that tree — no path plumbing required. Scenarios continue to live at `my-project/skills/<name>/tests/*.yaml`.
+With this file at a project root, skills live at:
+
+```text
+skills/<skill-name>/SKILL.md
+skills/<skill-name>/tests/*.yaml
+```
 
 ## CLI
 
 ```bash
-# --- Skill-backed scenarios -----------------------------------------------
+# Create a config
+ai-tester init
+ai-tester init --force --skills-dir ./agent-skills --model gpt-5-codex --permission-mode plan
 
-# List and validate scenarios without spawning the SDK.
+# Validate without creating a sandbox or runtime process
 ai-tester run [skill] --dry-run
+ai-tester run --file ./scenario.yaml --dry-run
 
-# Run one scenario by its id.
-ai-tester run <skill> --scenario <scenario-id>
-
-# Run every discovered scenario across all skills under skills_dir.
+# Run scenarios
 ai-tester run
+ai-tester run <skill>
+ai-tester run <skill> --scenario <scenario-id>
+ai-tester run --file ./scenario.yaml --runtime codex
 
-# --- Bare prompt / ad-hoc scenarios --------------------------------------
-
-# Run a single scenario YAML anywhere on disk. Works for inline system_prompt,
-# system_prompt_file, or even a skill-backed scenario that's outside skills_dir.
-ai-tester run --file /path/to/scenario.yaml
-
-# Dry-run the same file without hitting the SDK.
-ai-tester run --file /path/to/scenario.yaml --dry-run
-
-# --- Inspecting past runs ------------------------------------------------
-
-# Show the most recent runs with timestamp, pass/fail, tokens, cost.
+# Inspect history
 ai-tester history
-
-# Filter by skill and/or scenario; limit the list.
-ai-tester history aif-plan --scenario fast-creates-plan-md --last 10
-
-# Raw JSON for piping into jq / spreadsheets / dashboards.
+ai-tester history <skill> --scenario <scenario-id> --last 10
 ai-tester history --json
 
-# --- Housekeeping --------------------------------------------------------
-
-# Self-check the assertion evaluators with a synthetic trace (no SDK, no sandbox).
-npm run smoke
-
-# List orphan sandboxes left behind by crashed / SIGKILL'd runs.
-ai-tester sandbox-prune            # dry — lists only
-ai-tester sandbox-prune --yes      # actually delete
-ai-tester sandbox-prune --min-age 300 --yes   # only older than 5 min
+# Runtime and housekeeping
+ai-tester runtimes
+ai-tester sandbox-prune
+ai-tester sandbox-prune --yes --min-age 300
 ```
 
-### `run` flags
+Placeholder commands currently kept for CLI shape:
 
-| Flag | What it does |
+```bash
+ai-tester trend <skill>
+ai-tester compare <run-a> <run-b>
+ai-tester trace <run-id>
+```
+
+Exit codes:
+
+- `0`: all scenarios passed
+- `1`: assertion failure
+- `2`: runtime, sandbox, or configuration error
+
+## Scenario Sources
+
+A scenario declares exactly one of:
+
+| Field | Use for |
 | --- | --- |
-| `--scenario <id>` | Run a single scenario by its `scenario:` id. |
-| `--file <path>` | Run a single scenario YAML anywhere on disk (bypasses skill discovery). Useful for ad-hoc inline-prompt tests and external scenarios. |
-| `--filter <regex>` | Only scenarios whose id matches the regex. |
-| `--model <id>` | Override `runner.model` for all matched scenarios (e.g. `claude-opus-4-7`, `gpt-5-codex`). |
-| `--runtime <name>` | Override `runner.runtime` (e.g. `claude`, `codex`). |
-| `--dry-run` | Parse + validate YAML, print summary. No sandbox, no SDK calls. |
-| `--keep-sandbox` | Don't delete the sandbox worktree after the run — for post-mortem inspection. |
-| `--quiet` | Hide live progress events, only show final summary. |
-| `--idle-warn <seconds>` | Print a warning when no stream event arrives for N seconds (default 30). |
+| `skill: <name>` | Test a skill loaded from `skills_dir`. |
+| `system_prompt: |` | Test a raw inline system prompt. |
+| `system_prompt_file: <path>` | Load the prompt body from a file relative to the scenario YAML. |
 
-### Other commands
-
-- `ai-tester runtimes` — list registered runtimes and their readiness status.
-- `ai-tester history [skill] [--scenario <id>] [--last <n>] [--json]` — browse prior runs stored in `runs/`. See [Run history & token consumption](#run-history--token-consumption).
-- `ai-tester sandbox-prune [--yes] [--min-age <s>]` — find/delete orphan sandboxes.
-- `npm run smoke` — synthetic-trace self-check of the assertion evaluators.
-
-**Exit codes:** `0` all pass, `1` assertion failed, `2` runtime / sandbox / SDK error.
-
----
-
-## Testing modes
-
-A scenario declares **exactly one** of three prompt sources:
-
-| Field | Use for | Skill install into sandbox? |
-| --- | --- | --- |
-| `skill: <name>` | Testing a skill loaded from `skills_dir`. | Yes — copied to `<sandbox>/.claude/skills/<name>/` and references become readable at that path. |
-| `system_prompt: \|` (inline) | Testing a raw system prompt without any skill. | No. |
-| `system_prompt_file: <rel-path>` | Same as inline, but the prompt body lives in a sibling file. Path resolves relative to the scenario YAML. | No. |
-
-### 1. Skill-backed scenario
-
-Lives alongside the skill at `skills/<skill-name>/tests/<slug>.yaml`. Files starting with `_` are ignored (reserved for future shared fixtures).
-
-### 2. Inline prompt scenario
+### Inline Prompt Example
 
 ```yaml
-# anywhere-on-disk.yaml  — run via `ai-tester run --file anywhere-on-disk.yaml`
-scenario: inline-prompt-demo
+scenario: inline-demo
 system_prompt: |
-  You are a helpful coding assistant. When asked to write a function, always
-  include type hints and a one-line docstring. Respond concisely.
-argument: "write a Python function that returns the length of a string"
+  You are a concise coding assistant.
+argument: "Say done."
 
 runner:
+  runtime: codex
+  model: gpt-5-codex
+  permission_mode: bypassPermissions
+
+assertions:
+  - id: says-done
+    type: output_contains
+    pattern: "\\bdone\\b"
+```
+
+### Skill Scenario Example
+
+```yaml
+scenario: basic-skill-run
+skill: demo-skill
+argument: "Inspect this repo and summarize it."
+max_turns: 12
+
+runner:
+  runtime: claude
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
 
-fixtures: {}
-
-assertions:
-  - id: has-type-hint
-    type: output_contains
-    pattern: "->\\s*int"
-  - id: has-docstring
-    type: output_contains
-    pattern: '"""'
-```
-
-### 3. Prompt from an external file
-
-```yaml
-scenario: prompt-from-file
-system_prompt_file: ./prompts/reviewer.md   # relative to this YAML
-argument: "review src/auth.ts"
-# ...
-```
-
-### Scripted user turns (`user_prompt` / `user_prompts`)
-
-By default the harness builds the first user message for you:
-
-- Skill-backed scenarios: `"Run the <skill> skill defined in your system prompt. Follow its instructions end-to-end against the current working directory. Argument: <argument>"`.
-- Inline prompts: just the `argument` (or `"Begin."` if omitted).
-
-You can override this. **Two shapes, pick one — they're mutually exclusive:**
-
-**`user_prompt` (single string)** — replaces the auto-generated opener with a verbatim message. Use it to drive the agent the way a human would — `/skill-name <args>` in Claude Code, a `$preset` reference in Codex, or any custom phrasing:
-
-```yaml
-scenario: slash-invocation
-skill: aif-plan
-user_prompt: "/aif-plan fast add GET /health endpoint returning 200 OK"
-# `argument` is ignored when `user_prompt` is set — write whatever you want verbatim.
-```
-
-**`user_prompts` (list of strings)** — scripted chain of turns delivered one-by-one **in the same agent session**. Useful for warm-up flows ("study the repo first, then implement"). Each entry is sent as a fresh user turn; when the agent finishes responding, the harness transparently resumes the same session (`resume: sessionId` under the hood — the `session_id` pinned on the first init is reused for every step) and sends the next message. Context, tool history, and any side effects accumulate across the whole chain:
-
-```yaml
-scenario: warmup-then-implement
-skill: aif-plan
-user_prompts:
-  - "Study this repo. Read the key files under src/, skim package.json, and tell me the architecture in 3 sentences. Do not edit anything yet."
-  - "/aif-plan add a GET /health endpoint that returns 200 OK"
-```
-
-**Rules & gotchas:**
-
-- Declaring both `user_prompt` and `user_prompts` is a validation error. Pick one. For a single turn, use `user_prompt`; for chains of 2+, use `user_prompts`.
-- Both fields take precedence over the auto-template **and** over `argument`. Strings are sent verbatim — no `{argument}` interpolation; write the argument inline.
-- Budgets (`max_turns`, `token_budget`) and assertions apply to the **aggregated** run, not to individual steps. If you need per-step pass/fail, split into two scenarios.
-- A step that errors or exhausts `max_turns` stops the chain early; remaining scripted messages are not sent.
-- During the run each scripted turn prints as `▸ [step N/M] "..."` in magenta, so you can tell which prompt the agent is currently working on.
-- The per-step `● finished` marker is expected — it's the end of one query in the chain, not the end of the scenario. The next scripted turn resumes the same session right after.
-
-## Complete scenario example (skill-backed)
-
-A scenario is a YAML file at `skills/<skill-name>/tests/<slug>.yaml`. Files starting with `_` are ignored (reserved for future shared fixtures).
-
-```yaml
-# skills/aif-commit/tests/basic-feat.yaml
-scenario: basic-feat-commit               # required — unique id, referenced by --scenario
-description: |                            # optional — free-form human note
-  Staged feature addition → git status → git diff --cached → conventional
-  `feat` commit → ask confirmation → commit → ask push → skip push.
-skill: aif-commit                         # required — skill directory name
-argument: "auth"                          # optional — appended to the kickoff prompt
-max_turns: 14                             # optional — see "Turn budget" below
-
-runner:
-  model: claude-sonnet-4-6                # default; can be overridden with --model
-  permission_mode: bypassPermissions      # one of: bypassPermissions | acceptEdits | plan | default
-  allowed_tools_override:                 # optional — replaces skill's `allowed-tools`
-    - Read
-    - Write
-    - Bash(git *)
-  # setting_sources: [user, project]      # optional, Claude-only. See "SDK vs CLI parity" below.
-
-fixtures:                                 # see "Fixtures" section
+fixtures:
   git_init: true
-  git_branch: feature/auth
   files_committed:
     - path: README.md
       content: "# Demo\n"
-    - path: src/auth/login.ts
-      content: |
-        export function login() {}
-  files_staged:
-    - path: src/auth/reset.ts
-      content: "export function resetPassword() {}\n"
 
-user_responses:                            # see "User responses" section
-  - match_question: "(?i)commit|proposed|confirm|message"
-    choose: "Commit as is"
-  - match_question: "(?i)push"
-    choose: "Skip push"
-
-assertions:                                # see "Assertion types" section
-  - id: calls-git-status
-    type: tool_called
-    tool: Bash
-    args_match:
-      command: "^git status"
-
-  - id: diff-confirm-then-commit
-    type: tool_call_sequence
-    sequence:
-      - tool: Bash
-        args_match:
-          command: "^git diff --cached"
-      - tool: AskUserQuestion
-      - tool: Bash
-        args_match:
-          command: "^git commit"
-    weight: 2
-
-  - id: no-unscoped-bash
-    type: no_tool_called
-    tool: Bash
-    args_match:
-      command: "^(?!git )"
-
-  - id: mentions-feat-type
+assertions:
+  - id: mentions-demo
     type: output_contains
-    pattern: "\\bfeat\\b"
-
-  - id: efficient
-    type: turn_count_at_most
-    max: 12
-
+    pattern: "(?i)demo"
   - id: stay-in-sandbox
     type: no_path_escape
 ```
 
----
+## Scripted User Turns
+
+By default, `ai-tester` generates the first user message from the scenario. Override it with:
+
+```yaml
+user_prompt: "/demo-skill inspect src"
+```
+
+Or run a sequence in one logical session:
+
+```yaml
+user_prompts:
+  - "Study the repository. Do not edit files."
+  - "Now run the actual task."
+```
+
+`user_prompt` and `user_prompts` are mutually exclusive.
 
 ## Fixtures
 
-Describes the sandbox state before the skill runs. Every field is optional and defaults to empty.
+Fixtures create the sandbox state before the runtime starts.
 
 ```yaml
 fixtures:
-  git_init: true                          # `git init` the sandbox
-  git_branch: feature/auth                # create + checkout this branch after baseline commit
+  git_init: true
+  git_branch: feature/demo
 
-  # Directory trees copied into the sandbox before any file-level fixtures.
-  # Perfect for large or binary fixtures that shouldn't be inlined in YAML.
-  # `from` is relative to THIS scenario YAML; `to` is relative to the sandbox
-  # root (default: "."). Contents of `from/` are copied — not the directory
-  # itself — so `from: ./fixtures/repo` with `to: "."` merges the tree into
-  # the sandbox root.
   copy_trees:
-    - from: ./fixtures/baseline-repo      # ./fixtures/baseline-repo/**  → sandbox/**
-    - from: ./fixtures/vendor
-      to: vendor/                         # ./fixtures/vendor/**         → sandbox/vendor/**
+    - from: ./fixtures/repo
+      to: .
 
-  # Files written, added, and committed as the initial baseline.
-  # Applied AFTER `copy_trees`, so these overlay (and can override) tree files.
   files_committed:
     - path: README.md
-      content: "# Demo repo\n"
-    - path: src/index.ts
-      content: |
-        import express from 'express';
-        const app = express();
-    # Load content from a sibling file instead of inlining it. Path is
-    # resolved relative to the scenario YAML. Mutually exclusive with `content`.
-    - path: src/auth/login.ts
-      content_from: ./fixtures/login.ts
+      content: "# Demo\n"
+    - path: src/lib.rs
+      content_from: ./fixtures/lib.rs
 
-  # Files written and `git add`-ed but NOT committed — become "Changes to be committed".
   files_staged:
-    - path: src/auth/reset.ts
-      content: "export function resetPassword() {}\n"
-    - path: src/auth/signup.ts
-      content_from: ./fixtures/signup.ts  # same content_from shorthand works here
+    - path: src/new.rs
+      content: "pub fn new() {}\n"
 
-  # Files written without staging — appear as untracked in `git status`.
   files_unstaged:
     - path: TODO.md
-      content: "- audit the migrations\n"
+      content: "- audit\n"
 
-  # Arbitrary shell commands run inside the sandbox after file seeding.
   setup_commands:
-    - npm init -y
     - git tag v0.1.0
 
-  # Env vars the skill sees. Combined with a curated allowlist (CLAUDE_*, PATH, HOME, etc).
   env:
     MY_FLAG: "1"
 ```
 
-### Loading fixtures from disk
+Order of operations:
 
-For anything larger than a few lines, inline `content:` gets unwieldy. Two options:
+1. Create temp sandbox.
+2. Install the skill under `.claude/skills/<name>/` for skill-backed scenarios.
+3. `git init` if requested.
+4. Copy directory trees.
+5. Write and commit `files_committed`.
+6. Checkout `git_branch` if set.
+7. Write and stage `files_staged`.
+8. Write `files_unstaged`.
+9. Run `setup_commands`.
 
-| Scope | Field | Semantics |
-| --- | --- | --- |
-| Single file | `content_from: <rel-path>` on a `files_committed` / `files_staged` / `files_unstaged` entry | Read UTF-8 file content at load time. Path is relative to the scenario YAML. Mutually exclusive with `content`. |
-| Whole directory | `copy_trees: [{from, to?}]` at the `fixtures` level | Recursively copy the directory's **contents** into the sandbox. `from` is relative to the scenario YAML; `to` (default `.`) is relative to the sandbox root. Applied before file-level fixtures, so later `files_committed` / `files_staged` / `files_unstaged` entries overlay. |
+`setup_commands` run through `cmd /C` on Windows and `/bin/sh -c` on Unix.
 
-Both resolve the scenario YAML as the base directory, so you can colocate fixtures next to the scenario:
-
-```
-skills/aif-plan/tests/
-├── big-repo.yaml
-└── fixtures/
-    ├── baseline-repo/
-    │   ├── package.json
-    │   ├── src/
-    │   └── tests/
-    └── login.ts
-```
-
-```yaml
-# skills/aif-plan/tests/big-repo.yaml
-scenario: plan-on-real-repo
-skill: aif-plan
-fixtures:
-  git_init: true
-  copy_trees:
-    - from: ./fixtures/baseline-repo
-  files_staged:
-    - path: src/auth/login.ts
-      content_from: ./fixtures/login.ts
-# …
-```
-
-When `git_init: true`, everything seeded via `copy_trees` + `files_committed` is combined into a single baseline commit.
-
-### Skill installation inside the sandbox
-
-Before `git init`, the skill directory is copied to `<sandbox>/.claude/skills/<skill-name>/` so the skill has access to its own `references/*.md` files (TASK-FORMAT, EXAMPLES, etc.). A `.gitignore` rule adds `.claude/` so the install doesn't pollute `git status` output inside the test. The system prompt is automatically extended with an instruction that tells the model where relative `references/...` paths resolve.
-
----
-
-## User responses
-
-Answers pre-registered for the skill's `AskUserQuestion` / `Questions` tool calls. Evaluated as a FIFO queue per scenario — each entry is consumed when first matched and never reused.
-
-```yaml
-user_responses:
-  - match_question: "(?i)proposed|commit message"    # regex against question text
-    choose: "Commit as is"                            # must match one of the option labels
-  - match_question: "(?i)push"
-    choose: "Skip push"
-```
-
-- **Batched questions.** `AskUserQuestion` can include multiple questions in one call (`input.questions[]`). Each question is matched **independently** — if one is unanswered, the `no_unanswered_questions` implicit assertion fails even when its siblings had matches.
-- **PCRE inline flags supported.** Start the pattern with `(?i)` / `(?m)` / `(?s)` and the runtime will lift it into a JS `flags` string, since V8 `RegExp` doesn't accept inline flags natively.
-
----
-
-## Assertion types
-
-All assertions share two optional fields:
-
-- `id: string` (required) — unique within the scenario, shown in the report.
-- `weight: number` (default `1`) — future-looking input to `scoring.weightedScore`. Currently does **not** affect pass/fail; a scenario is `✓` only when every assertion passes.
+## Assertions
 
 ### `tool_called`
 
-A tool call with the given name exists in the trace (and optionally matches arguments and position).
-
 ```yaml
-- id: reads-config
-  type: tool_called
-  tool: Read
-  args_match:                     # regex map; EVERY pair must match
-    file_path: "\\.ai-factory/config\\.yaml$"
-
-- id: first-git-call-is-status
+- id: calls-git-status
   type: tool_called
   tool: Bash
-  call_index: 0                   # the 0-th Bash call (per-tool counter)
   args_match:
     command: "^git status"
 ```
 
-On pass, echo selected input fields back into the report via `capture:` — handy for eyeballing what the agent actually wrote or queried without opening the raw trace:
-
-```yaml
-- id: writes-plan-md-path
-  type: tool_called
-  tool: Write
-  args_match:
-    file_path: "\\.ai-factory/PLAN\\.md$"
-  capture: [content]              # any field of the matched tool call's input
-  capture_max_chars: 3000         # optional; default 2000. Trace stores full value regardless.
-```
-
-The reporter prints each captured field under the assertion line as a dim pipe-quoted block and annotates whether it was truncated (e.g. `content (truncated, showing 2000/8423 chars — full value in trace)`). The untruncated value is always persisted under `assertions[].captures` in the JSON trace.
-
 ### `tool_call_sequence`
 
-Ordered list of tool calls, not necessarily contiguous in the trace.
-
 ```yaml
-- id: read-then-confirm-then-write
+- id: status-before-commit
   type: tool_call_sequence
   sequence:
-    - tool: Read
+    - tool: Bash
       args_match:
-        file_path: "\\.ai-factory/config\\.yaml$"
-    - tool: AskUserQuestion        # no args_match = match any call to this tool
-    - tool: Write
+        command: "^git status"
+    - tool: Bash
       args_match:
-        file_path: "\\.ai-factory/PLAN\\.md$"
-      capture: [content]           # `capture:` works per-step; output tags each with its step index
-  weight: 2                        # optional — weight this chain heavier for the score
-  capture_max_chars: 3000          # optional cap applied to all steps
+        command: "^git commit"
 ```
 
 ### `no_tool_called`
 
-Negative assertion — fails if a matching tool call exists.
-
 ```yaml
-- id: no-write-tool
+- id: no-web-search
   type: no_tool_called
-  tool: Write
-
-- id: no-unscoped-bash
-  type: no_tool_called
-  tool: Bash
-  args_match:
-    command: "^(?!git )"            # negative lookahead: any Bash not starting with `git`
+  tool: WebSearch
 
 - id: no-mcp-tools
   type: no_tool_called
-  tool_pattern: "^mcp__"            # match tool names by regex instead of exact name
+  tool_pattern: "^mcp__"
 ```
 
 ### `output_contains`
 
-Regex on the final assistant text (last assistant turn after `stop_reason === "end_turn"`).
-
 ```yaml
-- id: mentions-feat-type
+- id: mentions-result
   type: output_contains
-  pattern: "\\bfeat\\b"
-
-- id: summary-in-russian
-  type: output_contains
-  pattern: "(?i)создал|готово|завершено"
+  pattern: "(?i)done"
 ```
 
 ### `turn_count_at_most`
-
-Soft cap. Unlike the hard `max_turns`, this runs independently as an assertion.
 
 ```yaml
 - id: efficient
@@ -557,405 +313,124 @@ Soft cap. Unlike the hard `max_turns`, this runs independently as an assertion.
 
 ### `no_path_escape`
 
-All file-path tool calls stayed inside the sandbox (or explicitly allowed prefixes).
-
 ```yaml
-# Minimal — checks Read / Write / Edit / Glob / Grep path fields against the sandbox.
 - id: stay-in-sandbox
   type: no_path_escape
-
-# Narrow the check + allow specific outside prefixes.
-- id: strict-stay
-  type: no_path_escape
-  tools: [Read, Write, Edit]        # override the default list
-  allow_outside:
-    - ~/.config/                    # tilde is expanded to $HOME
-    - /etc/ssl/certs/
 ```
 
-- Resolves relative paths against the sandbox cwd, normalizes, then checks the prefix.
-- macOS `/var` ↔ `/private/var` symlinking is handled — you don't need to list both forms.
-- **`Bash` is NOT parsed.** Shell commands can reference arbitrary paths and parsing is unreliable. If you care about `cat /etc/passwd` or `cd /home/user/secrets`, add a complementary `no_tool_called Bash args_match.command: "..."` assertion.
+Implicit assertions:
 
-### Implicit assertions (always on)
+- `no_unanswered_questions`: every supported question tool call had a matching `user_responses` entry.
+- `token_budget`: emitted when a scenario or skill declares a token budget.
 
-- **`no_unanswered_questions`** — every `AskUserQuestion` question had a matching `user_responses` entry. If the skill asks a new question the scenario didn't anticipate, this fires. Fix: add an entry or widen `match_question`.
-- **`turn_budget`** — fires only when `max_turns` is set explicitly AND the SDK stopped with subtype `error_max_turns`. See "Turn budget" below.
-- **`token_budget`** — fires only when the scenario (`token_budget: <N>`) or its skill (`token-budget: <N>` in SKILL.md) declares a budget and the run's `input + output + cache-creation + cache-read` exceeds it. Scenario wins over skill. See [Token budget](#token-budget).
+## Regex Semantics
 
-### Regex semantics
+`args_match`, `match_question`, and `output_contains` support leading inline flags:
 
-`args_match`, `match_question`, and `output_contains` patterns are JavaScript regex strings with one extension: PCRE-style inline flags `(?i)`, `(?m)`, `(?s)` at the start of the pattern are converted into a JS `flags` string, since V8 doesn't accept them inline. Example: `"(?i)test"` becomes `/test/i`.
+- `(?i)` case-insensitive
+- `(?m)` multi-line
+- `(?s)` dot matches newline
 
-In `args_match`, the value for each field is tested against `String(input[field] ?? "")`. So you can match against `Bash.command`, `Write.content`, `Read.file_path`, etc.
+Example:
 
----
+```yaml
+pattern: "(?is)hello.*world"
+```
 
-## Skill security checks
+## Runtime Adapters
 
-Agent skills are system prompts that run with real tool access — `Bash`, `Read`, `Write`, `Edit`, `WebFetch`, `WebSearch`. A careless or hostile skill can exfiltrate secrets to the public internet, burn your API quota on its own agenda, or quietly modify files outside its stated scope. In 2026 a skill is part of your supply chain: you install it, it ships with your agent, it runs against your repo.
+The Rust rewrite uses external CLIs and parses JSONL output. It does not embed the previous Node SDKs.
 
-`ai-tester` turns the assertion primitives into a **behavioral security gate for CI** — every skill is validated against a declarative baseline before it ships, and every attempted violation is recorded in the trace so you know exactly which turn made the call.
+### Codex
 
-### No calls to the outside world
+The Codex adapter runs:
+
+```bash
+codex exec --json --skip-git-repo-check --cd <sandbox> -a never -s <sandbox-mode>
+```
+
+Permission mapping:
+
+| Scenario `permission_mode` | Codex sandbox |
+| --- | --- |
+| `bypassPermissions` | `danger-full-access` |
+| `acceptEdits` | `workspace-write` |
+| `plan` | `read-only` |
+| `default` | `workspace-write` |
+
+For `user_prompts`, later turns use `codex exec resume`.
+
+### Claude
+
+The Claude adapter runs:
+
+```bash
+claude -p --output-format stream-json --verbose --include-partial-messages
+```
+
+Claude receives the scenario `permission_mode` directly.
+
+## Traces
+
+Live runs write schema `2.0.0` traces to:
+
+```text
+runs/<skill-or-inline>/<run-id>.json
+```
+
+Trace records include:
+
+- skill metadata and source hashes
+- scenario metadata
+- runner timing, model, permission mode, max turns, and sandbox path
+- normalized turns and tool calls
+- final output
+- assertion results and weighted score
+- token usage and cost when reported by the runtime
+- runtime errors and parser diagnostics
+
+## History
+
+```bash
+ai-tester history
+ai-tester history --json
+```
+
+History reads v2 traces under `runs/` and prints newest runs first.
+
+## Security Checks
+
+Useful assertion patterns:
 
 ```yaml
 - id: no-web-search
   type: no_tool_called
   tool: WebSearch
 
-- id: no-web-fetch
-  type: no_tool_called
-  tool: WebFetch
-
 - id: no-network-shell
   type: no_tool_called
   tool: Bash
   args_match:
-    command: "(?i)(^|[^a-z])(curl|wget|nc|ssh|scp|rsync|ftp|telnet)(\\s|$)|https?://|git\\s+push|npm\\s+publish|pip\\s+install"
-```
+    command: "(?i)(curl|wget|nc|ssh|scp|rsync|ftp|telnet)|https?://|git\\s+push"
 
-### Filesystem stays inside the sandbox
-
-```yaml
-- id: stay-in-sandbox
-  type: no_path_escape
-
-- id: no-secret-file-reads
-  type: no_tool_called
-  tool: Read
-  args_match:
-    file_path: "(^|/)(\\.env|\\.ssh|\\.aws|\\.netrc|id_rsa|\\.gnupg)"
-```
-
-### No destructive or privileged shell
-
-```yaml
 - id: no-destructive-shell
   type: no_tool_called
   tool: Bash
   args_match:
-    command: "rm\\s+-[rf]+\\s+/|git\\s+push\\s+.*--force|chmod\\s+777|>\\s*/dev/(sd|nvme)"
+    command: "rm\\s+-[rf]+\\s+/|git\\s+push\\s+.*--force|chmod\\s+777"
 
-- id: no-privilege-escalation
-  type: no_tool_called
-  tool: Bash
-  args_match:
-    command: "^\\s*(sudo|doas|su\\s)"
+- id: stay-in-sandbox
+  type: no_path_escape
 ```
 
-### Strictest mode: closed tool allowlist
-
-For skills that should never need shell or network, skip the post-hoc checks and hand the model a closed list — the unsafe tools simply aren't wired up:
-
-```yaml
-runner:
-  allowed_tools_override: [Read, Grep, Glob]
-```
-
-The model never sees `Bash`, `WebFetch`, or `Write` — nothing to block after the fact.
-
-### Running as a CI gate
+## Development
 
 ```bash
-ai-tester run --scenario security-baseline
-# exit 0 — clean
-# exit 1 — at least one security assertion failed
-# exit 2 — runtime / sandbox error
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-Because every scenario runs in an isolated git worktree under `$TMPDIR`, a failing check means the behavior was *attempted*, not that damage was done. You catch it in CI, not in prod — and the JSON trace points at the exact turn and tool call that tripped the rule.
+The test suite uses fake runtime executables and golden JSONL-style fixtures. CI must not call real model providers.
 
----
-
-## Runtimes
-
-`ai-tester` runs scenarios through a pluggable **runtime adapter**. Pick which one to use per scenario (or override across the whole run with `--runtime`):
-
-```yaml
-runner:
-  runtime: claude           # default; alternatives: "codex"
-  model: claude-sonnet-4-6
-  permission_mode: bypassPermissions
-```
-
-### Built-in adapters
-
-| Runtime | SDK | Auth | Notes |
-| --- | --- | --- | --- |
-| `claude` | `@anthropic-ai/claude-agent-sdk` | `claude login` OAuth (Claude Max/Pro) | Default. Full support for `AskUserQuestion` batches, `allowed-tools` scoping, skill installation into `.claude/skills/`. |
-| `codex` | `@openai/codex-sdk` | `codex login` (ChatGPT) or `OPENAI_API_KEY` | Spawns the `codex` CLI. Skill body is folded into the first user turn (Codex has no separate `systemPrompt`). `AskUserQuestion` is not supported — `user_responses` entries are ignored. `permission_mode` maps to Codex `sandboxMode`. Tool-call events are normalized into the same `ToolCallRecord` shape so assertions reuse as-is. |
-
-Run `ai-tester runtimes` to see which adapters are installed and logged in on this machine.
-
-### Codex scenario example
-
-```yaml
-scenario: codex-creates-health-endpoint
-skill: aif-plan
-argument: "fast add GET /health endpoint returning 200 OK"
-
-runner:
-  runtime: codex
-  model: gpt-5-codex
-  permission_mode: bypassPermissions   # maps to Codex sandboxMode: danger-full-access
-
-fixtures:
-  git_init: true
-  files_committed:
-    - path: README.md
-      content: "# Demo\n"
-
-assertions:
-  - id: writes-plan-md
-    type: tool_called
-    tool: Write                           # Codex `file_change` events map to Write/Edit
-    args_match:
-      file_path: "\\.ai-factory/PLAN\\.md$"
-
-  - id: mentions-feat
-    type: output_contains
-    pattern: "\\bGET /health\\b"
-
-  - id: stay-in-sandbox
-    type: no_path_escape
-```
-
-### Adding a new runtime
-
-Create `src/runtimes/<name>/index.ts` exporting `create<Name>Runtime(): RuntimeAdapter`:
-
-```typescript
-import type { RuntimeAdapter, RuntimeRunRequest, RuntimeRunResult } from "../types.js";
-
-export function createMyRuntime(): RuntimeAdapter {
-  return {
-    name: "myruntime",
-    description: "Short human-readable description for the `runtimes` command.",
-    async preflight() {
-      // Check CLI installed, SDK importable, etc.
-      return { ok: true };
-    },
-    async run(req: RuntimeRunRequest): Promise<RuntimeRunResult> {
-      // Use req.skill.body / req.firstUserMessage / req.cwd / req.scenario.runner.model
-      // Emit req.onProgress({kind: "tool_use", ...}) for each observable event.
-      // Map the runtime's native events into the shared Turn / ToolCallRecord shape.
-      return { turns: [], finalOutput: "...", turnsUsed: 0, /* ... */ };
-    },
-  };
-}
-```
-
-Then register it in `src/runtimes/index.ts::bootstrapRuntimes()`. Scenarios opt in with `runner.runtime: myruntime`.
-
-The shared `RuntimeRunRequest` / `RuntimeRunResult` / `ProgressEvent` shapes live in `src/runtimes/types.ts` — every adapter maps its provider-specific events into them so the assertion layer, console reporter, and trace writer work unchanged.
-
-## Turn budget
-
-`max_turns` in a scenario is optional:
-
-- **Omitted** — the runner uses an internal safety cap (currently `40`). Hitting it prints a yellow warning and the scenario does **not** fail. Good default for exploratory tests.
-- **Set explicitly** — the cap becomes a hard budget. Hitting it fails the scenario with `✗ turn_budget`.
-
-For an independent check regardless of the hard cap, use the `turn_count_at_most` assertion.
-
----
-
-## SDK vs CLI parity (`runner.setting_sources`)
-
-Running a skill through the harness uses the same Claude Agent SDK that powers the interactive `claude` CLI — the tool-call loop, built-in tools (`Bash` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `WebFetch` / `WebSearch` / `AskUserQuestion` / `Skill` / `Task`), and permission-mode semantics are identical.
-
-**What differs by default (intentional, for hermetic tests):**
-
-- **User hooks** from `~/.claude/settings.json` (`PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` / …) are **not** fired.
-- **User-level MCP servers** configured in `~/.claude/mcp.json` are **not** connected.
-- **User-level skills** under `~/.claude/skills/` are **not** discoverable. Only the skill being tested is installed (we copy it to `<sandbox>/.claude/skills/<name>/` and append its body to the system prompt).
-
-This keeps scenarios deterministic — a stray hook or missing MCP server in your dev machine doesn't turn a green run red on a teammate's box.
-
-**Opt in per scenario** when you *do* want that parity — e.g. you're specifically regression-testing a `PreToolUse` hook or a project-local MCP server:
-
-```yaml
-runner:
-  setting_sources: [user, project]    # Claude-only; Codex ignores this.
-```
-
-Valid values: `user`, `project`, `local` (maps 1:1 to the Claude Agent SDK's `settingSources` option). Omit or leave empty for the hermetic default.
-
-**Caveat.** Enabling `user` loads whatever is in `~/.claude/settings.json` on the machine that runs the test — a hook that writes outside the sandbox or an MCP server that calls external APIs can break isolation. Use sparingly and prefer `project` when the config is committed alongside the code under test.
-
----
-
-## Live progress during a run
-
-The runner streams events to the terminal as they arrive. Symbols:
-
-| Symbol | Meaning |
-| --- | --- |
-| `▸ session <id>` | SDK spawned the CLI and received `system/init`. |
-| `▸ Bash "git status"` | Assistant issued a tool call. |
-| `◂ ok Bash: ...` | Tool returned successfully; content preview truncated. |
-| `◂ !err Bash: ...` | Tool returned `is_error: true`. |
-| `? AskUserQuestion "..." → Commit as is` | Question matched in `user_responses` and was answered. |
-| `? AskUserQuestion "..." → no matching user_responses` | No match found — `no_unanswered_questions` will fail. |
-| `▸ "some text"` | Assistant text block (italic). |
-| `▸ [step 2/3] "..."` | Scripted user turn from `user_prompts` just sent to the agent (magenta). |
-| `● finished (success) cost ~$0.01` | Terminal `result` message from the SDK. |
-| `… idle for 30s — CLI may be stuck` | No events for the `--idle-warn` window. Ctrl-C to abort. |
-
-Pass `--quiet` to suppress the stream and only see the final per-scenario summary.
-
----
-
-## Runs
-
-Every run writes a JSON trace to `ai-tester/runs/<skill-or-inline>/<iso>__<semver>__<hash8>.json`. For skill-backed scenarios `<skill-or-inline>` is the skill directory name; for inline prompt scenarios it is `inline_<scenario-id>` (filesystem-safe sanitization of `inline:<scenario-id>`).
-
-The trace includes:
-
-- `runner.maxTurns`, `turnsUsed`, `hitMaxTurns`, `maxTurnsUserSet`
-- `turns[]` — every assistant + user turn with `toolCalls[]`, `toolResults`, `usage`
-- `toolCallSummary.{total, byTool, unansweredQuestions}`
-- `assertions[]` — each with `pass`, `detail`, `weight`
-- `scoring.{allPassed, overallPass, weightedScore}`
-- `cost.{inputTokens, outputTokens, cacheCreationTokens, cacheReadTokens, usdEstimate, source}`
-- `errors[]` — SDK / dispatcher / stream errors
-
-`runs/` and `cache/` are gitignored. Old runs accumulate until you delete them manually — there is no automatic retention (yet).
-
----
-
-## Run history & token consumption
-
-Every run's `cost` block records `inputTokens`, `outputTokens`, `cacheCreationTokens`, and `cacheReadTokens`. The runner aggregates these across scenarios and prints them in the final `=== Results ===` block alongside the USD estimate:
-
-```
-=== Results ===
-  Scenarios:         3
-  Passed:            2
-  Failed:            1
-  Duration:          42.1s
-  Total tokens:      128,431
-    input:           12,345
-    output:          5,678
-    cache-creation:  45,678
-    cache-read:      64,730 (84% of billable input)
-  Estimated cost:    ~$0.1234
-```
-
-> **Runtime coverage.** Claude populates all four token fields. Codex SDK only reports `input`, `output`, and `cached_input` — so `cache-creation` is always `0` on Codex runs and the USD estimate isn't emitted by the SDK (stays `~$0.0000`). Aggregation still works correctly; it's a property of the upstream SDK, not the harness.
-
-### Token budget
-
-Declare a ceiling in two places — scenario wins over skill when both are set.
-
-**Per skill** (applies to every scenario that tests this skill) — in `SKILL.md` frontmatter:
-
-```yaml
----
-name: my-skill
-description: ...
-allowed-tools: Read, Write, Bash(git *)
-token-budget: 50000     # total tokens (input + output + cache-creation + cache-read)
----
-```
-
-**Per scenario** (overrides the skill value) — in the scenario YAML:
-
-```yaml
-scenario: fast-path
-skill: my-skill
-token_budget: 10000     # snake_case preferred; `token-budget: 10000` is also accepted
-```
-
-When set, the implicit `token_budget` assertion runs after every scenario. If the total exceeds the budget the scenario fails with a red line showing the actual spend and the limit — same contract as any other assertion, so CI breaks on regressions. The trace stores both `scenario.tokenBudget` and `skill.tokenBudget` so you can see where the effective budget came from.
-
-Omit the field and nothing changes — skills/scenarios without a budget behave exactly as before.
-
-### Browsing historical runs
-
-`ai-tester history` reads every trace under `runs/` and renders a table sorted newest-first:
-
-```bash
-$ ai-tester history --last 5
-=== Run history === (showing 5 of 12)
-
-  ✗ 2026-04-22 10:55  aif-plan/fast-creates-plan-md                 11.6s  1t  0 calls  0 tok  —
-      3 error(s); trace: runs/aif-plan/aif-plan__2026-04-22T07-55-20Z__1.0.0__c0544baf.json
-  ✓ 2026-04-22 10:54  aif-plan/fast-creates-plan-md                 1m12s  20t  44 calls  251,709 tok  ~$0.1782
-  ✓ 2026-04-22 10:49  aif-plan/fast-creates-plan-md                 1m29s  29t  61 calls  293,271 tok  ~$0.2128
-  ✗ 2026-04-17 19:10  aif-plan/fast-creates-plan-md                 1m19s  1t  2 calls  420,604 tok  —
-  ✗ 2026-04-17 19:09  aif-plan/fast-creates-plan-md                 10.8s  1t  0 calls  0 tok  —
-
-  Σ 5 run(s), 2 pass, 3 fail, 107 tool calls, 965,584 tokens, ~$0.3910
-```
-
-Columns: ✓/✗, timestamp, `skill/scenario`, duration, turns, total tool calls, total tokens (plus `/<token-budget>` if declared), USD estimate. Scenarios that tripped `token_budget` get a red `over-budget` tag inline.
-
-Flags:
-
-| Flag | Effect |
-| --- | --- |
-| `[skill]` | Positional filter to one skill directory. |
-| `--scenario <id>` | Only runs whose `scenario:` id matches. |
-| `--last <n>` | Show only the last `N` entries (default `20`). |
-| `--json` | Emit the raw array instead of the formatted table — pipe into `jq`, spreadsheets, dashboards. |
-
-Use it after a batch run to spot token drift before it becomes a cost surprise, or pair with `--json` to feed an external trend chart.
-
----
-
-## Sandbox lifecycle
-
-Each scenario runs inside a throwaway worktree under `$TMPDIR/ai-tester-<scenario>-<rand>`:
-
-- **Success or assertion failure** — sandbox is deleted in the `finally` arm.
-- **Runner/SDK crash** — same `finally` cleanup path.
-- **SIGINT / SIGTERM / SIGHUP** — a process-wide signal handler walks the pending-cleanup registry and removes each tracked sandbox with a 3-second budget before `process.exit(130/143/129)`. Second Ctrl-C bypasses cleanup and kills immediately.
-- **`kill -9` / crash / machine reboot** — no cleanup fires. Use `ai-tester sandbox-prune`.
-
-```bash
-$ ai-tester sandbox-prune
-Found 2 orphan sandbox(es) under /var/folders/.../T (total 48.3 KB):
-
-       3h12m    24.1 KB  /var/folders/.../T/ai-tester-basic-feat-commit-abc123
-       1d04h    24.2 KB  /var/folders/.../T/ai-tester-fast-creates-plan-md-xyz789
-
-Dry run — pass --yes to actually delete these directories.
-```
-
-The `--min-age <seconds>` flag (default `60`) keeps in-flight runs safe — a currently-active sandbox has `mtime < now - 60s` and is skipped.
-
----
-
-## Still coming
-
-- `trend` / `compare` / `trace` commands (Phase 5) — see `ai-tester history` above for the basic list view that's already shipped.
-- LLM judges for semantic assertions — `output_is_question`, `llm_judge` with rubric (Phase 4)
-- Shared `_fixtures.yaml` that scenarios can extend (Phase 6)
-- Trials mode (`--trials N`) with pass-rate reporting (Phase 6)
-
----
-
-## Contributing
-
-Issues and pull requests are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup and PR checklist, and [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) before engaging with the community.
-
-Good first contributions:
-
-- New assertion types (follow the pattern in `src/assertions/`).
-- New runtime adapters (see the "Adding a new runtime" section above).
-- Scenario examples covering real skills or prompt patterns.
-- Docs improvements — typos, clarifications, better examples.
-
-## Security
-
-Found a vulnerability? Please **do not** open a public issue. See [SECURITY.md](./SECURITY.md) for the disclosure process.
-
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md) for release notes.
-
-## License
-
-[MIT](./LICENSE) © lee-to
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and release details.

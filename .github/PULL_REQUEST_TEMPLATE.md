@@ -21,13 +21,14 @@
 
 <!-- Describe how you verified the change. Commands, scenarios, before/after output. -->
 
-- [ ] `npm run build` passes
-- [ ] `npm run smoke` passes
+- [ ] `cargo fmt --check` passes
+- [ ] `cargo clippy --all-targets -- -D warnings` passes
+- [ ] `cargo test` passes
 - [ ] Added / updated tests or scenarios where relevant
 
 ## Checklist
 
-- [ ] Code follows the project's style (`tsc` passes without warnings).
+- [ ] Code follows the project's Rust style.
 - [ ] README / docs updated if the change is user-visible.
 - [ ] `CHANGELOG.md` has an entry under `## [Unreleased]`.
 - [ ] No secrets, tokens, or personal data in the diff.

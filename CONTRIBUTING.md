@@ -1,85 +1,72 @@
 # Contributing to ai-tester
 
-Thanks for your interest in contributing. This document covers the practical bits of working on the codebase.
+Thanks for your interest in contributing. This project is now a native Rust CLI.
 
-## Ground rules
+## Requirements
 
-- Be kind. See the [Code of Conduct](./CODE_OF_CONDUCT.md).
-- For security issues, follow the [Security Policy](./SECURITY.md) — **do not** open a public issue.
-- Open an issue before starting any non-trivial change so we can agree on the approach.
+- Rust 1.82 or newer
+- `git` on `PATH`
+- Optional `claude` and/or `codex` CLIs for manual live runtime checks
 
-## Development setup
-
-Requirements:
-
-- Node.js `>= 18`
-- A logged-in runtime CLI (`claude` and/or `codex`) if you plan to run actual scenarios. Pure unit work (scenario parsing, assertion logic, sandbox setup) does not need a runtime.
-
-Clone and bootstrap:
+## Setup
 
 ```bash
 git clone https://github.com/lee-to/ai-tester.git
 cd ai-tester
-npm install
-npm run build
+cargo build
 ```
-
-The CLI is runnable via `./bin/ai-tester.js`. `npm run watch` rebuilds TypeScript on save.
 
 ## Tests
 
 ```bash
-npm run smoke        # synthetic-trace self-check of the assertion evaluators (no SDK, no sandbox)
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-`npm run smoke` runs in CI and must pass on every PR.
+Unit and integration tests must not call real model providers. Use fake CLI executables or golden JSONL fixtures for runtime adapter coverage.
 
-For integration coverage, add a scenario under `skills/<skill>/tests/` or a standalone YAML runnable via `--file`.
+## Project Layout
 
-## Project layout
-
-```
-bin/           # CLI entry (thin wrapper over dist/cli.js)
+```text
 src/
-  cli.ts              # commander setup
+  cli.rs              # clap command definitions
   commands/           # subcommand implementations
-  config/             # project config loader (.ai-tester.yaml)
-  scenario/           # YAML scenario schema + loader
-  sandbox/            # temp git worktree + cleanup
-  runtimes/           # pluggable adapters (claude, codex, ...)
-  runner/             # Claude Agent SDK integration
-  assertions/         # declarative assertion evaluators
-  scoring/, trace/, report/
-scripts/       # dev scripts (smoke)
-dist/          # tsc output (gitignored, shipped to npm)
+  config.rs           # .ai-tester.yaml discovery
+  scenario.rs         # YAML scenario schema and loader
+  sandbox.rs          # temp git sandbox and fixtures
+  runtime/            # Claude/Codex process adapters and JSONL normalization
+  skill/              # SKILL.md parsing and skill discovery helpers
+  assertions/         # assertion evaluators
+  trace/              # v2 trace records and writer
+tests/                # Rust integration tests
 ```
 
-## Adding a new runtime adapter
+## Adding A Runtime
 
-See the "Runtimes" section of [README.md](./README.md#runtimes). In short: create `src/runtimes/<name>/index.ts` that exports a `create<Name>Runtime()` factory conforming to `RuntimeAdapter`, then register it in `src/runtimes/index.ts::bootstrapRuntimes()`.
+Add the process invocation and JSONL normalization in `src/runtime/mod.rs`, then cover it with golden parser tests. Live-provider tests should stay manual unless they can run against a fake executable in CI.
 
-## Adding a new assertion type
+## Adding An Assertion
 
-1. Add a discriminated-union variant to `AssertionSchema` in `src/scenario/schema.ts`.
-2. Implement the evaluator under `src/assertions/`.
-3. Wire it into `evaluateAssertions` in `src/assertions/index.ts`.
-4. Add a synthetic case to `scripts/smoke.mjs` that exercises both pass and fail paths.
-5. Document the new assertion in README.
+1. Add a variant to `AssertionSpec` in `src/scenario.rs`.
+2. Add the evaluator in `src/assertions/mod.rs`.
+3. Add tests that cover pass and fail behavior.
+4. Document the assertion in `README.md`.
 
-## Pull request checklist
+## Pull Request Checklist
 
-- [ ] `npm run build` passes (no TypeScript errors).
-- [ ] `npm run smoke` passes.
-- [ ] New / changed behavior is reflected in `README.md`.
-- [ ] Entry added to `CHANGELOG.md` under `## [Unreleased]`.
-- [ ] Commit messages are descriptive (conventional commits preferred but not required).
+- [ ] `cargo fmt --check` passes.
+- [ ] `cargo clippy --all-targets -- -D warnings` passes.
+- [ ] `cargo test` passes.
+- [ ] User-visible behavior is documented in `README.md`.
+- [ ] `CHANGELOG.md` has an entry under `## [Unreleased]`.
 
-## Release process
+## Release Process
 
 Maintainers only:
 
-1. Update `CHANGELOG.md` — move `[Unreleased]` entries to a new version heading.
-2. Bump `version` in `package.json`.
-3. Tag the commit (`git tag v0.1.1 && git push --tags`).
-4. `npm publish --access public` (the `prepublishOnly` script runs `clean` + `build` + `smoke`).
-5. Draft a GitHub release with the changelog excerpt.
+1. Move changelog entries from `[Unreleased]` into a version heading.
+2. Bump `version` in `Cargo.toml`.
+3. Tag the commit and push the tag.
+4. Let the release workflow build platform artifacts.
+5. Publish to crates.io with `cargo publish`.
