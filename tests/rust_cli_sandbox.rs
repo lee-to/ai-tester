@@ -358,6 +358,7 @@ echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\
         fs::write(
             &path,
             "#!/bin/sh\n\
+cat >/dev/null\n\
 echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\
 echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n\
@@ -392,6 +393,7 @@ echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\
         fs::write(
             &path,
             "#!/bin/sh\n\
+cat >/dev/null\n\
 echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\
