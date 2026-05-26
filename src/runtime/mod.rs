@@ -4,8 +4,9 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::scenario::Scenario;
-use crate::trace::{ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
+use crate::scenario::{Scenario, UserResponse};
+use crate::trace::{AnsweredQuestion, ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
+use crate::util::regex::compile_pattern;
 
 pub struct RuntimeStatus {
     pub name: &'static str,
@@ -151,6 +152,15 @@ pub fn parse_claude_jsonl(
     max_turns_effective: u32,
     max_turns_user_set: bool,
 ) -> anyhow::Result<RuntimeRunResult> {
+    parse_claude_jsonl_with_user_responses(jsonl, max_turns_effective, max_turns_user_set, &[])
+}
+
+pub fn parse_claude_jsonl_with_user_responses(
+    jsonl: &str,
+    max_turns_effective: u32,
+    max_turns_user_set: bool,
+    user_responses: &[UserResponse],
+) -> anyhow::Result<RuntimeRunResult> {
     let mut out = RuntimeRunResult::new(max_turns_effective, max_turns_user_set);
     out.cost.source = "claude".to_string();
 
@@ -176,7 +186,7 @@ pub fn parse_claude_jsonl(
                         .map(ToOwned::to_owned);
                 }
             }
-            "assistant" => handle_claude_assistant(&event, &mut out),
+            "assistant" => handle_claude_assistant(&event, &mut out, user_responses),
             "user" => handle_claude_user(&event, &mut out),
             "result" => {
                 if let Some(result) = event.get("result").and_then(Value::as_str) {
@@ -286,7 +296,11 @@ fn handle_codex_item(item: &Value, is_completed: bool, out: &mut RuntimeRunResul
     }
 }
 
-fn handle_claude_assistant(event: &Value, out: &mut RuntimeRunResult) {
+fn handle_claude_assistant(
+    event: &Value,
+    out: &mut RuntimeRunResult,
+    user_responses: &[UserResponse],
+) {
     let mut turn = Turn {
         index: out.turns.len(),
         role: "assistant".to_string(),
@@ -307,7 +321,7 @@ fn handle_claude_assistant(event: &Value, out: &mut RuntimeRunResult) {
                     }
                 }
                 "tool_use" => {
-                    turn.tool_calls.push(ToolCallRecord::new(
+                    let mut call = ToolCallRecord::new(
                         block.get("id").and_then(Value::as_str).unwrap_or_default(),
                         block
                             .get("name")
@@ -317,7 +331,9 @@ fn handle_claude_assistant(event: &Value, out: &mut RuntimeRunResult) {
                             .get("input")
                             .cloned()
                             .unwrap_or_else(|| serde_json::json!({})),
-                    ));
+                    );
+                    annotate_question_call(&mut call, user_responses, out);
+                    turn.tool_calls.push(call);
                 }
                 _ => {}
             }
@@ -333,6 +349,66 @@ fn handle_claude_assistant(event: &Value, out: &mut RuntimeRunResult) {
     }
     out.turns_used += 1;
     out.turns.push(turn);
+}
+
+fn annotate_question_call(
+    call: &mut ToolCallRecord,
+    user_responses: &[UserResponse],
+    out: &mut RuntimeRunResult,
+) {
+    if !matches!(call.name.as_str(), "AskUserQuestion" | "Questions") {
+        return;
+    }
+    let question = question_text(&call.input);
+    if let Some((idx, response)) = matching_user_response(&question, user_responses, out) {
+        call.answered = Some(AnsweredQuestion {
+            matched_entry_index: idx as i32,
+            chosen_label: response.choose.clone(),
+        });
+    } else {
+        out.unanswered_questions += 1;
+    }
+}
+
+fn matching_user_response<'a>(
+    question: &str,
+    user_responses: &'a [UserResponse],
+    out: &mut RuntimeRunResult,
+) -> Option<(usize, &'a UserResponse)> {
+    for (idx, response) in user_responses.iter().enumerate() {
+        match compile_pattern(&response.match_question) {
+            Ok(pattern) if pattern.is_match(question) => return Some((idx, response)),
+            Ok(_) => {}
+            Err(err) => out.diagnostics.push(format!(
+                "invalid user_responses[{idx}].match_question regex: {err}"
+            )),
+        }
+    }
+    None
+}
+
+fn question_text(input: &Value) -> String {
+    if let Some(question) = input.get("question").and_then(Value::as_str) {
+        return question.to_string();
+    }
+    if let Some(questions) = input.get("questions") {
+        return match questions {
+            Value::String(value) => value.clone(),
+            Value::Array(items) => items
+                .iter()
+                .map(|item| {
+                    item.get("question")
+                        .or_else(|| item.get("text"))
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .unwrap_or_else(|| stringify_value(item))
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            other => stringify_value(other),
+        };
+    }
+    stringify_value(input)
 }
 
 fn handle_claude_user(event: &Value, out: &mut RuntimeRunResult) {
@@ -427,6 +503,8 @@ pub struct RuntimeRunRequest {
     pub scenario: Scenario,
     pub cwd: PathBuf,
     pub user_messages: Vec<String>,
+    pub user_responses: Vec<UserResponse>,
+    pub allowed_tools: Vec<String>,
     pub skill_install_rel_path: Option<String>,
 }
 
@@ -516,35 +594,20 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
     let mut combined = RuntimeRunResult::new(max_turns, max_turns_user_set);
     let mut session_id: Option<String> = None;
     for (idx, user_message) in req.user_messages.iter().enumerate() {
-        let prompt = if idx == 0 {
-            build_claude_input(
-                &req.skill_body,
-                req.skill_install_rel_path.as_deref(),
-                user_message,
-            )
-        } else {
-            user_message.clone()
-        };
-        let mut args = vec![
-            "-p".to_string(),
-            "--output-format".to_string(),
-            "stream-json".to_string(),
-            "--verbose".to_string(),
-            "--include-partial-messages".to_string(),
-            "--model".to_string(),
-            req.scenario.runner.model.clone(),
-            "--permission-mode".to_string(),
-            req.scenario.runner.permission_mode.clone(),
-            "--max-turns".to_string(),
-            max_turns.to_string(),
-        ];
-        if let Some(session) = &session_id {
-            args.push("--resume".to_string());
-            args.push(session.clone());
-        }
-        args.push(prompt);
+        let args = build_claude_args(
+            &req,
+            max_turns,
+            session_id.as_deref(),
+            user_message,
+            idx == 0,
+        );
         let stdout = run_process("claude", &args, Some(&req.cwd), None)?;
-        let parsed = parse_claude_jsonl(&stdout, max_turns, max_turns_user_set)?;
+        let parsed = parse_claude_jsonl_with_user_responses(
+            &stdout,
+            max_turns,
+            max_turns_user_set,
+            &req.user_responses,
+        )?;
         if session_id.is_none() {
             session_id = parsed.session_id.clone();
         }
@@ -665,12 +728,73 @@ fn build_codex_input(
     parts.join("\n\n")
 }
 
-fn build_claude_input(
-    skill_body: &str,
-    skill_install_rel_path: Option<&str>,
+fn build_claude_args(
+    req: &RuntimeRunRequest,
+    max_turns: u32,
+    session_id: Option<&str>,
     user_message: &str,
-) -> String {
-    build_codex_input(skill_body, skill_install_rel_path, user_message)
+    include_system_prompt: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        "--include-partial-messages".to_string(),
+        "--model".to_string(),
+        req.scenario.runner.model.clone(),
+        "--permission-mode".to_string(),
+        req.scenario.runner.permission_mode.clone(),
+        "--max-turns".to_string(),
+        max_turns.to_string(),
+    ];
+    if include_system_prompt {
+        args.push("--append-system-prompt".to_string());
+        args.push(build_claude_system_prompt(
+            &req.skill_body,
+            req.skill_install_rel_path.as_deref(),
+        ));
+    }
+    if !req.allowed_tools.is_empty() {
+        args.push("--allowedTools".to_string());
+        args.push(req.allowed_tools.join(","));
+    }
+    if let Some(sources) = &req.scenario.runner.setting_sources {
+        if !sources.is_empty() {
+            args.push("--setting-sources".to_string());
+            args.push(sources.join(","));
+        }
+    }
+    if let Some(session) = session_id {
+        args.push("--resume".to_string());
+        args.push(session.to_string());
+    }
+    args.push(build_claude_user_prompt(
+        req.skill_install_rel_path.as_deref(),
+        user_message,
+    ));
+    args
+}
+
+fn build_claude_system_prompt(skill_body: &str, skill_install_rel_path: Option<&str>) -> String {
+    let mut parts = vec![skill_body.to_string()];
+    if let Some(path) = skill_install_rel_path {
+        parts.push(format!(
+            "## Skill installation context (ai-tester)\n\nThis skill is installed at `{path}` relative to the current working directory."
+        ));
+    }
+    parts.join("\n\n")
+}
+
+fn build_claude_user_prompt(skill_install_rel_path: Option<&str>, user_message: &str) -> String {
+    let mut parts = Vec::new();
+    if let Some(path) = skill_install_rel_path {
+        parts.push(format!(
+            "## Skill installation context (ai-tester)\n\nThe active skill is installed at `{path}` relative to the current working directory."
+        ));
+    }
+    parts.push(format!("## User request\n\n{user_message}"));
+    parts.join("\n\n---\n\n")
 }
 
 fn map_codex_permission_mode(mode: &str) -> &'static str {
@@ -710,4 +834,55 @@ fn command_exists(name: &str) -> bool {
         cmd
     };
     cmd.output().is_ok_and(|out| out.status.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenario::Runner;
+
+    #[test]
+    fn claude_args_put_skill_in_system_prompt_and_scope_tools() {
+        let mut scenario = Scenario::from_yaml_str(
+            "scenario: claude-args\nsystem_prompt: Body\nrunner:\n  runtime: claude\n  model: test-model\n  permission_mode: plan\n  setting_sources: [project]\n",
+        )
+        .expect("scenario parses");
+        scenario.runner = Runner {
+            allowed_tools_override: None,
+            ..scenario.runner
+        };
+        let req = RuntimeRunRequest {
+            runtime: "claude".to_string(),
+            skill_body: "SKILL BODY".to_string(),
+            scenario,
+            cwd: PathBuf::from("."),
+            user_messages: vec!["do it".to_string()],
+            user_responses: Vec::new(),
+            allowed_tools: vec!["Read".to_string(), "Bash(git *)".to_string()],
+            skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
+        };
+
+        let args = build_claude_args(&req, 3, None, "do it", true);
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "test-model"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--permission-mode" && pair[1] == "plan"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--allowedTools" && pair[1] == "Read,Bash(git *)"));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--setting-sources" && pair[1] == "project"));
+        let system_prompt = args
+            .windows(2)
+            .find(|pair| pair[0] == "--append-system-prompt")
+            .map(|pair| pair[1].as_str())
+            .expect("append system prompt arg exists");
+        assert!(system_prompt.contains("SKILL BODY"));
+        let user_prompt = args.last().expect("prompt exists");
+        assert!(user_prompt.contains("do it"));
+        assert!(!user_prompt.contains("SKILL BODY"));
+    }
 }

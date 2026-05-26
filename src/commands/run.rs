@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use chrono::Utc;
 
-use crate::assertions::{compute_weighted_score, evaluate_assertions};
+use crate::assertions::{compute_weighted_score, evaluate_assertions, AssertionResult};
 use crate::config::load_project_config;
 use crate::sandbox::{create_sandbox, SandboxOptions, SkillInstall};
 use crate::scenario::{load_scenario_file, LoadedScenario, Scenario};
@@ -43,7 +43,8 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
     match discover_scenarios(&opts) {
         Ok(scenarios) => {
             for loaded in scenarios {
-                print_scenario_dry_run(&loaded);
+                let scenario = prepare_scenario(&loaded, &opts)?;
+                print_scenario_dry_run(&loaded, &scenario);
                 total += 1;
             }
         }
@@ -82,15 +83,14 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     println!();
 
     for loaded in scenarios {
-        let mut scenario = loaded.scenario.clone();
-        if let Some(model) = opts.model.clone() {
-            scenario.runner.model = model;
-        }
-        if let Some(runtime) = opts.runtime.clone() {
-            scenario.runner.runtime = runtime;
-        }
+        let scenario = prepare_scenario(&loaded, &opts)?;
 
         let skill = resolve_skill(&loaded, &scenario)?;
+        let allowed_tools = scenario
+            .runner
+            .allowed_tools_override
+            .clone()
+            .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
         if !crate::runtime::runtime_ready(&runtime_name) {
             println!(
@@ -128,6 +128,8 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             scenario: scenario.clone(),
             cwd: sandbox.path.clone(),
             user_messages,
+            user_responses: scenario.user_responses.clone(),
+            allowed_tools,
             skill_install_rel_path: sandbox
                 .skill_install_path
                 .as_ref()
@@ -156,7 +158,10 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         });
 
         if record.errors.is_empty() {
-            let assertions = evaluate_assertions(&scenario.assertions, &record);
+            let mut assertions = evaluate_assertions(&scenario.assertions, &record);
+            if record.runner.hit_max_turns && record.runner.max_turns_user_set {
+                assertions.push(turn_budget_assertion(&record));
+            }
             let all_passed = assertions.iter().all(|result| result.pass);
             let weighted = compute_weighted_score(&assertions);
             record.assertions = assertions;
@@ -255,6 +260,28 @@ fn discover_scenarios(opts: &RunOptions) -> anyhow::Result<Vec<LoadedScenario>> 
     Ok(out)
 }
 
+fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Result<Scenario> {
+    let mut scenario = loaded.scenario.clone();
+    let config = load_project_config(std::env::current_dir()?)?;
+    if !loaded.source_meta.runner_model_set {
+        if let Some(model) = config.defaults.model {
+            scenario.runner.model = model;
+        }
+    }
+    if !loaded.source_meta.runner_permission_mode_set {
+        if let Some(permission_mode) = config.defaults.permission_mode {
+            scenario.runner.permission_mode = permission_mode;
+        }
+    }
+    if let Some(model) = opts.model.clone() {
+        scenario.runner.model = model;
+    }
+    if let Some(runtime) = opts.runtime.clone() {
+        scenario.runner.runtime = runtime;
+    }
+    Ok(scenario)
+}
+
 fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
     if !skills_dir.is_dir() {
         return Ok(Vec::new());
@@ -268,8 +295,7 @@ fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
     Ok(names)
 }
 
-fn print_scenario_dry_run(loaded: &LoadedScenario) {
-    let scenario = &loaded.scenario;
+fn print_scenario_dry_run(loaded: &LoadedScenario, scenario: &Scenario) {
     let source = if let Some(skill) = &scenario.skill {
         format!("skill {skill}")
     } else if scenario.system_prompt.is_some() {
@@ -461,6 +487,23 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
         cost: runtime_result.cost,
         errors: runtime_result.errors,
         diagnostics: runtime_result.diagnostics,
+    }
+}
+
+fn turn_budget_assertion(record: &TraceRecord) -> AssertionResult {
+    AssertionResult {
+        id: "turn_budget".to_string(),
+        kind: "turn_budget".to_string(),
+        pass: false,
+        detail: format!(
+            "runtime stopped after hitting explicit max_turns={} (turns used: {})",
+            record.runner.max_turns, record.runner.turns_used
+        ),
+        weight: 1.0,
+        score: None,
+        min_score: None,
+        rationale: None,
+        captures: Vec::new(),
     }
 }
 

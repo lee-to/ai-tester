@@ -1,7 +1,9 @@
 use ai_tester::assertions::{compute_weighted_score, evaluate_assertions};
 use ai_tester::config::load_project_config;
-use ai_tester::runtime::{parse_claude_jsonl, parse_codex_jsonl};
-use ai_tester::scenario::{AssertionSpec, Scenario};
+use ai_tester::runtime::{
+    parse_claude_jsonl, parse_claude_jsonl_with_user_responses, parse_codex_jsonl,
+};
+use ai_tester::scenario::{load_scenario_file, AssertionSpec, Scenario, UserResponse};
 use ai_tester::skill::allowed_tools::tokenize_allowed_tools;
 use ai_tester::skill::parse_skill_md;
 use ai_tester::trace::{ToolCallRecord, TraceRecord, Turn};
@@ -31,6 +33,30 @@ fn scenario_accepts_token_budget_alias_and_rejects_prompt_conflicts() {
     let bad = "scenario: conflict\nskill: aif-commit\nsystem_prompt: hi\n";
     let err = Scenario::from_yaml_str(bad).expect_err("multiple prompt sources rejected");
     assert!(err.to_string().contains("exactly one"));
+}
+
+#[test]
+fn scenario_loader_tracks_explicit_runner_fields() {
+    let tmp = TempDir::new().expect("temp dir");
+    let scenario_path = tmp.path().join("scenario.yaml");
+    std::fs::write(
+        &scenario_path,
+        "scenario: defaults\nsystem_prompt: Body\nrunner:\n  runtime: codex\n",
+    )
+    .expect("scenario written");
+
+    let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
+    assert!(!loaded.source_meta.runner_model_set);
+    assert!(!loaded.source_meta.runner_permission_mode_set);
+
+    std::fs::write(
+        &scenario_path,
+        "scenario: explicit\nsystem_prompt: Body\nrunner:\n  model: explicit-model\n  permission_mode: plan\n",
+    )
+    .expect("scenario written");
+    let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
+    assert!(loaded.source_meta.runner_model_set);
+    assert!(loaded.source_meta.runner_permission_mode_set);
 }
 
 #[test]
@@ -159,6 +185,40 @@ fn assertions_report_failures_for_unwanted_tool_and_unanswered_questions() {
 }
 
 #[test]
+fn no_path_escape_inspects_tool_path_inputs_against_sandbox() {
+    let tmp = TempDir::new().expect("temp dir");
+    let mut trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool("1", "Write", serde_json::json!({"file_path": "src/lib.rs"})),
+            Turn::assistant_with_tool(
+                "2",
+                "Read",
+                serde_json::json!({"file_path": "../escape.txt"}),
+            ),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+    trace.runner.sandbox_path = Some(tmp.path().to_string_lossy().to_string());
+
+    let assertions = vec![AssertionSpec::NoPathEscape {
+        id: "paths-stay-inside".to_string(),
+        weight: 1.0,
+        tools: None,
+        allow_outside: None,
+    }];
+    let results = evaluate_assertions(&assertions, &trace);
+
+    let path_result = results
+        .iter()
+        .find(|result| result.id == "paths-stay-inside")
+        .expect("path assertion exists");
+    assert!(!path_result.pass);
+    assert!(path_result.detail.contains("../escape.txt"));
+}
+
+#[test]
 fn trace_serializes_with_v2_schema_version() {
     let trace = TraceRecord::synthetic(
         vec![Turn::assistant_with_tool(
@@ -228,4 +288,35 @@ fn claude_jsonl_parser_normalizes_tool_results_and_usage() {
     assert_eq!(parsed.cost.cache_creation_tokens, 5);
     assert_eq!(parsed.cost.usd_estimate, 0.01);
     assert!(parsed.max_turns_user_set);
+}
+
+#[test]
+fn claude_jsonl_parser_accounts_for_question_user_responses() {
+    let jsonl = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q-1","name":"AskUserQuestion","input":{"question":"Proceed with commit?"}}]}}
+{"type":"result","subtype":"success","result":"done"}
+"#;
+
+    let unanswered =
+        parse_claude_jsonl_with_user_responses(jsonl, 12, false, &[]).expect("jsonl parses");
+    assert_eq!(unanswered.unanswered_questions, 1);
+    assert!(unanswered.turns[0].tool_calls[0].answered.is_none());
+
+    let answered = parse_claude_jsonl_with_user_responses(
+        jsonl,
+        12,
+        false,
+        &[UserResponse {
+            match_question: "Proceed".to_string(),
+            choose: "Yes".to_string(),
+        }],
+    )
+    .expect("jsonl parses");
+    assert_eq!(answered.unanswered_questions, 0);
+    assert_eq!(
+        answered.turns[0].tool_calls[0]
+            .answered
+            .as_ref()
+            .map(|answer| answer.chosen_label.as_str()),
+        Some("Yes")
+    );
 }

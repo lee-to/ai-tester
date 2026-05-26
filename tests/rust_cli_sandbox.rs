@@ -197,6 +197,72 @@ fn cli_run_with_fake_codex_writes_trace_and_evaluates_assertions() {
 }
 
 #[test]
+fn cli_run_fails_when_explicit_max_turns_is_hit() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex_two_turns(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: turn-budget\nsystem_prompt: You are helpful.\nmax_turns: 1\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("FAIL turn_budget"))
+        .stdout(predicate::str::contains("FAIL"));
+}
+
+#[test]
+fn cli_run_applies_project_defaults_to_omitted_runner_fields() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\ndefaults:\n  model: config-model\n  permission_mode: plan\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: config-defaults\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_config-defaults"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    assert_eq!(trace["runner"]["model"], "config-model");
+    assert_eq!(trace["runner"]["permissionMode"], "plan");
+}
+
+#[test]
 fn cli_run_discovers_skill_scenarios_and_installs_skill_in_sandbox() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -267,6 +333,41 @@ echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\
             &path,
             "#!/bin/sh\n\
 echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
+echo '{\"type\":\"turn.started\"}'\n\
+echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n\
+echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",
+        )
+        .expect("fake codex written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_codex_two_turns(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let path = bin_dir.join("codex.cmd");
+        fs::write(
+            path,
+            "@echo off\r\n\
+echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
+echo {\"type\":\"turn.started\"}\r\n\
+echo {\"type\":\"turn.started\"}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\r\n\
+echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}\r\n",
+        )
+        .expect("fake codex written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("codex");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
+echo '{\"type\":\"turn.started\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\
 echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n\
 echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",

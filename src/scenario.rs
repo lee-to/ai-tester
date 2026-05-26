@@ -84,17 +84,39 @@ impl Scenario {
 pub struct LoadedScenario {
     pub scenario: Scenario,
     pub file_path: PathBuf,
+    pub source_meta: ScenarioSourceMeta,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScenarioSourceMeta {
+    pub runner_model_set: bool,
+    pub runner_permission_mode_set: bool,
 }
 
 pub fn load_scenario_file(path: impl AsRef<Path>) -> anyhow::Result<LoadedScenario> {
     let file_path = path.as_ref().canonicalize()?;
     let raw = fs::read_to_string(&file_path)?;
+    let source_meta = scenario_source_meta(&raw);
     let mut scenario = Scenario::from_yaml_str(&raw)?;
     materialize_fixtures(&mut scenario, file_path.parent().unwrap_or(Path::new(".")))?;
     Ok(LoadedScenario {
         scenario,
         file_path,
+        source_meta,
     })
+}
+
+fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
+    let value = yaml_serde::from_str::<Value>(raw).unwrap_or(Value::Null);
+    let runner = value.get("runner");
+    ScenarioSourceMeta {
+        runner_model_set: runner
+            .and_then(|runner| runner.get("model"))
+            .is_some_and(|value| !value.is_null()),
+        runner_permission_mode_set: runner
+            .and_then(|runner| runner.get("permission_mode"))
+            .is_some_and(|value| !value.is_null()),
+    }
 }
 
 pub fn materialize_fixtures(scenario: &mut Scenario, scenario_dir: &Path) -> anyhow::Result<()> {
