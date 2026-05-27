@@ -6,8 +6,8 @@ Only the latest minor release line receives security updates.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | Yes       |
-| < 0.1   | No        |
+| 0.6.x   | Yes       |
+| < 0.6   | No        |
 
 ## Reporting a Vulnerability
 
@@ -40,12 +40,13 @@ We credit reporters in release notes by default. Let us know if you prefer to re
 
 In scope:
 
-- The `@cutcode/ai-tester` npm package and anything it ships (`bin/`, `dist/`).
+- The Rust `ai-tester` binary and crate release artifacts.
 - The scenario schema and its handling of user-supplied YAML / filesystem paths.
-- The sandbox lifecycle (`src/sandbox/`) — particularly anything that could escape the sandbox or leak host filesystem state.
+- The sandbox lifecycle (`src/sandbox.rs`) — particularly anything that could escape the sandbox or leak host filesystem state.
+- Runtime JSONL parsing and command construction for `claude` / `codex` subprocess adapters.
 
 Out of scope:
 
-- Vulnerabilities in third-party runtimes (`claude` CLI, `codex` CLI) or their SDKs — please report to the respective upstream projects.
+- Vulnerabilities in third-party runtimes (`claude` CLI, `codex` CLI) — please report to the respective upstream projects.
 - Social-engineering or physical-access attacks.
 - Denial of service from running extremely large fixtures or adversarial scenarios (this is a developer tool; resource limits are the user's responsibility).

@@ -1,6 +1,0 @@
-dist/
-node_modules/
-runs/
-cache/
-package-lock.json
-CHANGELOG.md
