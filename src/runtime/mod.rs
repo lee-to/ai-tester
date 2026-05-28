@@ -1,6 +1,13 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -602,7 +609,11 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             &args,
             Some(&req.cwd),
             None,
-            ProcessOutputMode::Buffered,
+            if req.progress {
+                ProcessOutputMode::StreamJsonl
+            } else {
+                ProcessOutputMode::Buffered
+            },
         )?;
         let parsed = parse_claude_jsonl_with_user_responses(
             &stdout,
@@ -697,39 +708,306 @@ fn read_stdout_buffered(stdout: impl Read) -> anyhow::Result<String> {
 
 fn read_stdout_streaming_jsonl(stdout: impl Read) -> anyhow::Result<String> {
     let mut captured = String::new();
+    let mut progress = JsonlProgress::new();
     let reader = BufReader::new(stdout);
     for line in reader.lines() {
         let line = line?;
-        print_jsonl_progress(&line);
+        progress.print_line(&line);
         captured.push_str(&line);
         captured.push('\n');
     }
+    progress.finish();
     Ok(captured)
 }
 
-fn print_jsonl_progress(line: &str) {
-    let Ok(event) = serde_json::from_str::<Value>(line) else {
-        return;
-    };
-    match event
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-    {
-        "turn.started" => println!("    {} started", ui::tag("turn", Tone::Info)),
-        "turn.completed" => println!("    {} completed", ui::tag("turn", Tone::Success)),
-        "turn.failed" => println!("    {} failed", ui::tag("turn", Tone::Error)),
-        "item.started" => {
-            if let Some(item) = event.get("item") {
-                print_item_progress("started", item);
+struct JsonlProgress {
+    live: Option<LiveProgress>,
+    active_items: HashMap<String, String>,
+}
+
+impl JsonlProgress {
+    fn new() -> Self {
+        Self {
+            live: LiveProgress::new(),
+            active_items: HashMap::new(),
+        }
+    }
+
+    fn print_line(&mut self, line: &str) {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        match event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "turn.started" => {
+                if let Some(live) = &self.live {
+                    live.set_status("Thinking");
+                } else {
+                    println!("    {} started", ui::tag("turn", Tone::Info));
+                }
+            }
+            "turn.completed" => {
+                if self.live.is_some() {
+                    self.completed("Turn completed", Tone::Success);
+                } else {
+                    println!("    {} completed", ui::tag("turn", Tone::Success));
+                }
+            }
+            "turn.failed" => {
+                if self.live.is_some() {
+                    self.completed("Turn failed", Tone::Error);
+                } else {
+                    println!("    {} failed", ui::tag("turn", Tone::Error));
+                }
+            }
+            "item.started" => {
+                if let Some(item) = event.get("item") {
+                    self.item_started(item);
+                }
+            }
+            "item.completed" => {
+                if let Some(item) = event.get("item") {
+                    self.item_completed(item);
+                }
+            }
+            "assistant" => self.claude_assistant(&event),
+            "user" => self.claude_user(&event),
+            "result" => {
+                if event.get("subtype").and_then(Value::as_str) == Some("success") {
+                    if self.live.is_some() {
+                        self.completed("Runtime result received", Tone::Success);
+                    }
+                } else {
+                    self.status("Runtime finished");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(live) = &mut self.live {
+            live.finish();
+        }
+    }
+
+    fn status(&mut self, text: &str) {
+        if let Some(live) = &self.live {
+            live.set_status(text);
+        } else {
+            println!(
+                "    {} {}",
+                ui::tag("turn", Tone::Info),
+                text.to_ascii_lowercase()
+            );
+        }
+    }
+
+    fn item_started(&mut self, item: &Value) {
+        let label = item_progress_label(item);
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            self.active_items.insert(id.to_string(), label.clone());
+        }
+        if let Some(live) = &self.live {
+            live.set_status(&label);
+        } else {
+            print_item_progress("started", item);
+        }
+    }
+
+    fn item_completed(&mut self, item: &Value) {
+        let label = item
+            .get("id")
+            .and_then(Value::as_str)
+            .and_then(|id| self.active_items.remove(id))
+            .unwrap_or_else(|| item_progress_label(item));
+        if self.live.is_some() {
+            self.completed(&label, item_progress_tone(item, true));
+        } else {
+            print_item_progress("completed", item);
+        }
+    }
+
+    fn claude_assistant(&mut self, event: &Value) {
+        let Some(content) = event.pointer("/message/content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                continue;
+            }
+            let id = block.get("id").and_then(Value::as_str).unwrap_or_default();
+            let label = tool_call_progress_label(
+                block.get("name").and_then(Value::as_str).unwrap_or("tool"),
+                block.get("input").unwrap_or(&Value::Null),
+            );
+            if !id.is_empty() {
+                self.active_items.insert(id.to_string(), label.clone());
+            }
+            if let Some(live) = &self.live {
+                live.set_status(&label);
+            } else {
+                println!("    {} {label} started", ui::tag("tool", Tone::Accent));
             }
         }
-        "item.completed" => {
-            if let Some(item) = event.get("item") {
-                print_item_progress("completed", item);
+    }
+
+    fn claude_user(&mut self, event: &Value) {
+        let Some(content) = event.pointer("/message/content").and_then(Value::as_array) else {
+            return;
+        };
+        for block in content {
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            let id = block
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let label = self
+                .active_items
+                .remove(id)
+                .unwrap_or_else(|| "Tool call".to_string());
+            let tone = if block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                Tone::Error
+            } else {
+                Tone::Success
+            };
+            if self.live.is_some() {
+                self.completed(&label, tone);
+            } else {
+                println!("    {} {label} completed", ui::tag("tool", tone));
             }
         }
-        _ => {}
+    }
+
+    fn completed(&mut self, text: &str, tone: Tone) {
+        if let Some(live) = &self.live {
+            live.print_completed(text, tone);
+            live.set_status("Processing");
+        } else {
+            let tag_tone = if matches!(tone, Tone::Error) {
+                Tone::Error
+            } else {
+                Tone::Success
+            };
+            println!(
+                "    {} {}",
+                ui::tag("turn", tag_tone),
+                text.to_ascii_lowercase()
+            );
+        }
+    }
+}
+
+struct LiveProgress {
+    status: Arc<Mutex<String>>,
+    output_lock: Arc<Mutex<()>>,
+    needs_gap: Arc<AtomicBool>,
+    gap_rendered: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl LiveProgress {
+    fn new() -> Option<Self> {
+        if !std::io::stdout().is_terminal() && !truthy_env("AI_TESTER_FORCE_PROGRESS") {
+            return None;
+        }
+        let status = Arc::new(Mutex::new("Starting".to_string()));
+        let output_lock = Arc::new(Mutex::new(()));
+        let needs_gap = Arc::new(AtomicBool::new(true));
+        let gap_rendered = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let thread_status = Arc::clone(&status);
+        let thread_output_lock = Arc::clone(&output_lock);
+        let thread_needs_gap = Arc::clone(&needs_gap);
+        let thread_gap_rendered = Arc::clone(&gap_rendered);
+        let thread_done = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut idx = 0usize;
+            while !thread_done.load(Ordering::Relaxed) {
+                let message = thread_status
+                    .lock()
+                    .map(|value| value.clone())
+                    .unwrap_or_else(|_| "Working".to_string());
+                let message = truncate_progress_for_terminal(&message, 8);
+                if let Ok(_guard) = thread_output_lock.lock() {
+                    if thread_needs_gap.swap(false, Ordering::Relaxed) {
+                        print!("\n");
+                        thread_gap_rendered.store(true, Ordering::Relaxed);
+                    }
+                    print!(
+                        "\r\x1b[2K    {} {}",
+                        ui::paint(frames[idx % frames.len()], Tone::Info),
+                        paint_progress_label(&message, Tone::Muted)
+                    );
+                    let _ = std::io::stdout().flush();
+                }
+                idx = idx.wrapping_add(1);
+                thread::sleep(Duration::from_millis(90));
+            }
+            if let Ok(_guard) = thread_output_lock.lock() {
+                if thread_gap_rendered.swap(false, Ordering::Relaxed) {
+                    print!("\r\x1b[2K\x1b[1A\r\x1b[2K");
+                }
+                print!("\r\x1b[2K");
+                let _ = std::io::stdout().flush();
+            }
+        });
+        Some(Self {
+            status,
+            output_lock,
+            needs_gap,
+            gap_rendered,
+            done,
+            handle: Some(handle),
+        })
+    }
+
+    fn set_status(&self, text: &str) {
+        if let Ok(mut status) = self.status.lock() {
+            *status = truncate_progress_value(text, 300);
+        }
+    }
+
+    fn print_completed(&self, text: &str, tone: Tone) {
+        if let Ok(_guard) = self.output_lock.lock() {
+            let text = truncate_progress_for_terminal(text, 8);
+            if self.gap_rendered.swap(false, Ordering::Relaxed) {
+                print!("\r\x1b[2K\x1b[1A\r\x1b[2K");
+            } else {
+                print!("\r\x1b[2K");
+            }
+            println!(
+                "    {} {}",
+                ui::paint("●", tone),
+                paint_progress_label(&text, Tone::Strong)
+            );
+            self.needs_gap.store(true, Ordering::Relaxed);
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    fn finish(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for LiveProgress {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 
@@ -771,6 +1049,135 @@ fn print_item_progress(state: &str, item: &Value) {
     }
 }
 
+fn item_progress_label(item: &Value) -> String {
+    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "command_execution" => {
+            let command = item
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            tool_call_progress_label("Bash", &serde_json::json!({ "command": command }))
+        }
+        "file_change" => {
+            let paths = item
+                .get("changes")
+                .and_then(Value::as_array)
+                .map(|changes| {
+                    changes
+                        .iter()
+                        .filter_map(|change| change.get("path").and_then(Value::as_str))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                "File changes".to_string()
+            } else {
+                format!("FileChange({})", truncate_progress_value(&paths, 120))
+            }
+        }
+        "agent_message" => "Assistant message".to_string(),
+        other if !other.is_empty() => other.to_string(),
+        _ => "Runtime event".to_string(),
+    }
+}
+
+fn item_progress_tone(item: &Value, default_success: bool) -> Tone {
+    if item.get("status").and_then(Value::as_str) == Some("failed") {
+        Tone::Error
+    } else if default_success {
+        Tone::Success
+    } else {
+        Tone::Muted
+    }
+}
+
+fn tool_call_progress_label(name: &str, input: &Value) -> String {
+    let detail = input
+        .get("file_path")
+        .or_else(|| input.get("path"))
+        .or_else(|| input.get("command"))
+        .or_else(|| input.get("pattern"))
+        .and_then(Value::as_str)
+        .map(|value| truncate_progress_value(value, 120))
+        .or_else(|| {
+            if input.is_object() && !input.as_object().is_some_and(|object| object.is_empty()) {
+                Some(truncate_progress_value(&input.to_string(), 120))
+            } else {
+                None
+            }
+        });
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{name}({detail})"),
+        _ => name.to_string(),
+    }
+}
+
+fn paint_progress_label(text: &str, detail_tone: Tone) -> String {
+    let Some(open_paren) = text.find('(') else {
+        return ui::paint(text, detail_tone);
+    };
+    format!(
+        "{}{}",
+        ui::paint(&text[..open_paren], Tone::Warning),
+        ui::paint(&text[open_paren..], detail_tone)
+    )
+}
+
+fn truncate_progress_for_terminal(value: &str, reserved_cols: usize) -> String {
+    let max_chars = terminal_columns()
+        .saturating_sub(reserved_cols)
+        .clamp(24, 120);
+    truncate_progress_value(value, max_chars)
+}
+
+#[cfg(unix)]
+fn terminal_columns() -> usize {
+    use std::os::raw::{c_int, c_ulong};
+
+    #[repr(C)]
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        ws_xpixel: u16,
+        ws_ypixel: u16,
+    }
+
+    #[cfg(target_os = "macos")]
+    const TIOCGWINSZ: c_ulong = 0x4008_7468;
+    #[cfg(not(target_os = "macos"))]
+    const TIOCGWINSZ: c_ulong = 0x5413;
+
+    unsafe extern "C" {
+        fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+    }
+
+    let mut winsize = Winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let rc = unsafe { ioctl(1, TIOCGWINSZ, &mut winsize) };
+    if rc == 0 && winsize.ws_col > 0 {
+        return winsize.ws_col as usize;
+    }
+    terminal_columns_from_env()
+}
+
+#[cfg(not(unix))]
+fn terminal_columns() -> usize {
+    terminal_columns_from_env()
+}
+
+fn terminal_columns_from_env() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|columns| *columns > 0)
+        .unwrap_or(80)
+}
+
 fn truncate_progress_value(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_string();
@@ -781,6 +1188,13 @@ fn truncate_progress_value(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     out.push_str("...");
     out
+}
+
+fn truthy_env(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        let value = value.trim().to_ascii_lowercase();
+        !value.is_empty() && value != "0" && value != "false" && value != "no"
+    })
 }
 
 #[cfg(windows)]

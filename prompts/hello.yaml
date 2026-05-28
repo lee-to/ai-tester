@@ -1,0 +1,10 @@
+scenario: hello
+description: Minimal smoke test that asks the agent to greet us.
+system_prompt: |
+  You are a concise assistant. Reply with a friendly greeting in Russian.
+user_prompt: |
+  Поприветствуй нас одним коротким предложением.
+assertions:
+  - id: says-hello
+    type: output_contains
+    pattern: "(?i)привет"

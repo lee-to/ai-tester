@@ -36,7 +36,7 @@ pub fn run_command(opts: RunOptions) -> anyhow::Result<i32> {
 }
 
 fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
-    println!("{}", ui::title("=== ai-tester (dry-run) ==="));
+    println!("{}", ui::header("ai-tester", "dry run"));
     println!();
 
     let mut total = 0usize;
@@ -60,20 +60,25 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
     }
 
     println!();
-    println!("{}", ui::title("=== Summary ==="));
-    println!("  {}: {total}", ui::paint("Scenarios", Tone::Muted));
-    println!("  {}:   {invalid}", ui::paint("Invalid", Tone::Muted));
+    println!("{}", ui::section("Summary"));
+    println!("  {}", ui::kv("scenarios", total));
+    println!("  {}", ui::kv("invalid", invalid));
     println!();
     if invalid > 0 {
         println!(
-            "{} - some scenarios failed to load.",
-            ui::status("FAIL", false)
+            "{} {}",
+            ui::status("FAIL", false),
+            ui::paint("some scenarios failed to load", Tone::Muted)
         );
         Ok(1)
     } else {
         println!(
-            "{} - all scenarios parsed. No sandbox created, no runtime calls made.",
-            ui::status("OK", true)
+            "{} {}",
+            ui::status("OK", true),
+            ui::paint(
+                "all scenarios parsed; no sandbox or runtime calls",
+                Tone::Muted
+            )
         );
         Ok(0)
     }
@@ -82,7 +87,12 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
 fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     let scenarios = discover_scenarios(&opts)?;
     if scenarios.is_empty() {
-        println!("No scenarios matched - nothing to run.");
+        println!("{}", ui::header("ai-tester", "behavioral run"));
+        println!(
+            "  {} {}",
+            ui::paint("●", Tone::Warning),
+            ui::paint("No scenarios matched", Tone::Muted)
+        );
         return Ok(0);
     }
     let total = scenarios.len();
@@ -135,12 +145,16 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             },
         )?;
         if !opts.quiet {
-            println!("  {}{}", ui::label("sandbox"), sandbox.path.display());
+            println!(
+                "  {}{}",
+                ui::label("sandbox"),
+                ui::fit_value(sandbox.path.display(), 15)
+            );
             if runtime_name == "codex" {
                 println!(
                     "  {}{}",
                     ui::label("progress"),
-                    ui::paint("streaming Codex events", Tone::Info)
+                    ui::paint("Codex event stream", Tone::Info)
                 );
             } else {
                 println!(
@@ -218,13 +232,25 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     print_run_summary(passed, failed, runtime_errors);
 
     if failed == 0 && runtime_errors == 0 {
-        println!("{}", ui::status("PASS", true));
+        println!(
+            "{} {}",
+            ui::paint("●", Tone::Success),
+            ui::status("PASS", true)
+        );
         Ok(0)
     } else if runtime_errors == 0 {
-        println!("{}", ui::status("FAIL", false));
+        println!(
+            "{} {}",
+            ui::paint("●", Tone::Error),
+            ui::status("FAIL", false)
+        );
         Ok(1)
     } else {
-        println!("{}", ui::status("FAIL", false));
+        println!(
+            "{} {}",
+            ui::paint("●", Tone::Error),
+            ui::status("FAIL", false)
+        );
         Ok(2)
     }
 }
@@ -235,7 +261,7 @@ fn discover_scenarios(opts: &RunOptions) -> anyhow::Result<Vec<LoadedScenario>> 
     }
 
     if let Some(file) = &opts.file {
-        return Ok(vec![load_scenario_file(file)?]);
+        return Ok(vec![load_scenario_file(resolve_scenario_file(file)?)?]);
     }
     if let Some(dir) = &opts.dir {
         return load_scenarios_from_dir(dir, opts);
@@ -294,6 +320,21 @@ fn discover_scenarios(opts: &RunOptions) -> anyhow::Result<Vec<LoadedScenario>> 
     Ok(out)
 }
 
+fn resolve_scenario_file(path: &Path) -> anyhow::Result<PathBuf> {
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if path.extension().is_none() {
+        for extension in ["yaml", "yml"] {
+            let candidate = path.with_extension(extension);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!("scenario file not found: {}", path.display())
+}
+
 fn load_scenarios_from_dir(dir: &Path, opts: &RunOptions) -> anyhow::Result<Vec<LoadedScenario>> {
     if !dir.is_dir() {
         anyhow::bail!("scenario directory not found: {}", dir.display());
@@ -349,6 +390,11 @@ fn scenario_matches_filters(loaded: &LoadedScenario, opts: &RunOptions) -> anyho
 fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Result<Scenario> {
     let mut scenario = loaded.scenario.clone();
     let config = load_project_config(std::env::current_dir()?)?;
+    if !loaded.source_meta.runner_runtime_set {
+        if let Some(runtime) = config.defaults.runtime {
+            scenario.runner.runtime = runtime;
+        }
+    }
     if !loaded.source_meta.runner_model_set {
         if let Some(model) = config.defaults.model {
             scenario.runner.model = model;
@@ -382,20 +428,19 @@ fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
 }
 
 fn print_run_banner(total: usize, opts: &RunOptions) {
-    println!("{}", ui::title("=== ai-tester ==="));
+    println!("{}", ui::header("ai-tester", "behavioral run"));
     println!(
-        "{}{}",
-        ui::label("scenarios"),
-        ui::paint(&total.to_string(), Tone::Strong)
+        "  {}",
+        ui::kv("scenarios", ui::paint(&total.to_string(), Tone::Strong))
     );
     if let Some(runtime) = &opts.runtime {
-        println!("{}{}", ui::label("runtime"), ui::paint(runtime, Tone::Info));
+        println!("  {}", ui::kv("runtime", ui::paint(runtime, Tone::Info)));
     }
     if let Some(model) = &opts.model {
-        println!("{}{}", ui::label("model"), ui::paint(model, Tone::Info));
+        println!("  {}", ui::kv("model", ui::paint(model, Tone::Info)));
     }
     if let Some(filter) = &opts.filter {
-        println!("{}{}", ui::label("filter"), filter);
+        println!("  {}", ui::kv("filter", filter));
     }
     println!();
 }
@@ -408,65 +453,152 @@ fn print_scenario_start(
     skill: &ResolvedSkill,
 ) {
     println!(
-        "{} {}",
+        "{} {} {}",
         ui::paint(&format!("[{index}/{total}]"), Tone::Accent),
-        ui::paint(&scenario.scenario, Tone::Strong)
+        ui::paint(&scenario.scenario, Tone::Strong),
+        ui::paint(&scenario_source_label(scenario), Tone::Muted)
+    );
+    print_prompt_source(scenario, skill, "  ");
+    println!(
+        "  {}",
+        ui::kv("runtime", ui::paint(&scenario.runner.runtime, Tone::Info))
+    );
+    println!(
+        "  {}",
+        ui::kv("model", ui::paint(&scenario.runner.model, Tone::Info))
+    );
+    println!(
+        "  {}",
+        ui::kv(
+            "permission",
+            format_permission_mode(&scenario.runner.permission_mode)
+        )
+    );
+    println!(
+        "  {}",
+        ui::kv(
+            "checks",
+            ui::paint(&scenario.assertions.len().to_string(), Tone::Strong)
+        )
     );
     println!(
         "  {}{}",
-        ui::label("source"),
-        scenario_source_label(scenario)
+        ui::label("file"),
+        ui::fit_value(loaded.file_path.display(), 15)
     );
-    println!(
-        "  {}{}",
-        ui::label("runtime"),
-        ui::paint(&scenario.runner.runtime, Tone::Info)
-    );
-    println!(
-        "  {}{}",
-        ui::label("model"),
-        ui::paint(&scenario.runner.model, Tone::Info)
-    );
-    println!(
-        "  {}{}",
-        ui::label("permission"),
-        scenario.runner.permission_mode
-    );
-    println!(
-        "  {}{}",
-        ui::label("checks"),
-        ui::paint(&scenario.assertions.len().to_string(), Tone::Strong)
-    );
-    println!("  {}{}", ui::label("file"), loaded.file_path.display());
     if scenario.skill.is_some() {
-        println!("  {}{}", ui::label("skill"), skill.path);
+        println!("  {}", ui::kv("skill", ui::fit_value(&skill.path, 15)));
     }
 }
 
 fn print_scenario_dry_run(loaded: &LoadedScenario, scenario: &Scenario) {
     println!(
-        "{} {} ({})",
-        ui::status("OK", true),
+        "  {} {} {}",
+        ui::paint("●", Tone::Success),
         ui::paint(&scenario.scenario, Tone::Strong),
-        loaded.file_path.display()
+        ui::paint(&format!("({})", loaded.file_path.display()), Tone::Muted)
     );
-    println!("    source:     {}", scenario_source_label(scenario));
-    println!("    runtime:    {}", scenario.runner.runtime);
-    println!("    model:      {}", scenario.runner.model);
-    println!("    permission: {}", scenario.runner.permission_mode);
-    println!("    assertions: {}", scenario.assertions.len());
+    println!("    {}", ui::kv("source", scenario_source_label(scenario)));
+    println!(
+        "    {}",
+        ui::kv("prompt", prompt_preview_for_scenario(scenario))
+    );
+    println!("    {}", ui::kv("runtime", &scenario.runner.runtime));
+    println!("    {}", ui::kv("model", &scenario.runner.model));
+    println!(
+        "    {}",
+        ui::kv(
+            "permission",
+            format_permission_mode(&scenario.runner.permission_mode)
+        )
+    );
+    println!("    {}", ui::kv("assertions", scenario.assertions.len()));
 }
 
 fn scenario_source_label(scenario: &Scenario) -> String {
     if let Some(skill) = &scenario.skill {
-        format!("skill {skill}")
+        format!("skill · {skill}")
     } else if scenario.system_prompt.is_some() {
-        "inline system_prompt".to_string()
+        "inline prompt".to_string()
     } else {
-        format!(
-            "system_prompt_file {}",
-            scenario.system_prompt_file.as_deref().unwrap_or("")
-        )
+        "prompt file".to_string()
+    }
+}
+
+fn print_prompt_source(scenario: &Scenario, skill: &ResolvedSkill, indent: &str) {
+    if let Some(skill_name) = &scenario.skill {
+        println!(
+            "{indent}{}",
+            ui::kv(
+                "prompt",
+                format!("skill {skill_name} · {}", ui::fit_value(&skill.path, 24))
+            )
+        );
+        return;
+    }
+    if let Some(system_prompt_file) = &scenario.system_prompt_file {
+        println!(
+            "{indent}{}",
+            ui::kv("prompt", format!("file {system_prompt_file}"))
+        );
+        println!("{indent}{}", ui::kv("preview", prompt_preview(&skill.body)));
+        return;
+    }
+    println!("{indent}{}", ui::kv("prompt", "inline YAML"));
+    println!("{indent}{}", ui::kv("preview", prompt_preview(&skill.body)));
+}
+
+fn prompt_preview_for_scenario(scenario: &Scenario) -> String {
+    if let Some(skill) = &scenario.skill {
+        return format!("skill {skill}");
+    }
+    if let Some(system_prompt_file) = &scenario.system_prompt_file {
+        return format!("file {system_prompt_file}");
+    }
+    scenario
+        .system_prompt
+        .as_deref()
+        .map(prompt_preview)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn prompt_preview(prompt: &str) -> String {
+    let preview = prompt
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    ui::fit_value(preview, 24)
+}
+
+fn format_permission_mode(mode: &str) -> String {
+    match mode {
+        "bypassPermissions" => format!(
+            "{} {}",
+            ui::paint("●", Tone::Warning),
+            ui::paint("bypassPermissions", Tone::Warning)
+        ),
+        "acceptEdits" => format!(
+            "{} {}",
+            ui::paint("●", Tone::Success),
+            ui::paint("acceptEdits", Tone::Success)
+        ),
+        "plan" => format!(
+            "{} {}",
+            ui::paint("●", Tone::Info),
+            ui::paint("plan", Tone::Info)
+        ),
+        "default" => format!(
+            "{} {}",
+            ui::paint("●", Tone::Muted),
+            ui::paint("default", Tone::Muted)
+        ),
+        other => format!(
+            "{} {}",
+            ui::paint("●", Tone::Muted),
+            ui::paint(other, Tone::Muted)
+        ),
     }
 }
 
@@ -664,36 +796,45 @@ fn turn_budget_assertion(record: &TraceRecord) -> AssertionResult {
 }
 
 fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool) {
-    let mark = ui::status(
-        if record.scoring.overall_pass {
-            "PASS"
-        } else {
-            "FAIL"
-        },
-        record.scoring.overall_pass,
+    let pass = record.scoring.overall_pass;
+    let status = if pass { "PASS" } else { "FAIL" };
+    let tone = if pass { Tone::Success } else { Tone::Error };
+    let mut stats = vec![
+        format_duration(record.runner.duration_ms),
+        format!(
+            "{}/{} turns",
+            record.runner.turns_used, record.runner.max_turns
+        ),
+    ];
+    if let Some(score) = record.scoring.weighted_score {
+        stats.push(format_score(score));
+    }
+    println!(
+        "  {} {} {}",
+        ui::paint("●", tone),
+        ui::status(status, pass),
+        ui::paint(&stats.join(" · "), Tone::Muted)
     );
-    println!("  {}{mark}", ui::label("result"));
     println!(
         "  {}{}",
-        ui::label("duration"),
-        format_duration(record.runner.duration_ms)
+        ui::label("trace"),
+        ui::fit_value(trace_path.display(), 15)
     );
-    println!(
-        "  {}{} / {}",
-        ui::label("turns"),
-        record.runner.turns_used,
-        record.runner.max_turns
-    );
-    if let Some(score) = record.scoring.weighted_score {
-        println!("  {}{}", ui::label("score"), format_score(score));
-    }
-    println!("  {}{}", ui::label("trace"), trace_path.display());
 
     if verbose && !record.assertions.is_empty() {
-        println!("  {}", ui::paint("assertions", Tone::Accent));
+        println!("  {}", ui::section("Assertions"));
         for assertion in &record.assertions {
-            let label = ui::status(if assertion.pass { "PASS" } else { "FAIL" }, assertion.pass);
-            println!("    {label:<4} {} - {}", assertion.id, assertion.detail);
+            let tone = if assertion.pass {
+                Tone::Success
+            } else {
+                Tone::Error
+            };
+            println!(
+                "    {} {} {}",
+                ui::paint("●", tone),
+                ui::paint(&assertion.id, Tone::Strong),
+                ui::paint(&assertion.detail, Tone::Muted)
+            );
         }
     } else if !record.assertions.is_empty() {
         let passed = record
@@ -702,9 +843,12 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
             .filter(|assertion| assertion.pass)
             .count();
         println!(
-            "  {}{passed}/{}",
-            ui::label("assertions"),
-            record.assertions.len()
+            "  {}{}",
+            ui::label("checks"),
+            ui::paint(
+                &format!("{passed}/{}", record.assertions.len()),
+                Tone::Strong
+            )
         );
         let failed_assertions = record
             .assertions
@@ -712,13 +856,13 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
             .filter(|assertion| !assertion.pass)
             .collect::<Vec<_>>();
         if !failed_assertions.is_empty() {
-            println!("  {}", ui::paint("failures", Tone::Error));
+            println!("  {}", ui::section("Failures"));
             for assertion in failed_assertions {
                 println!(
-                    "    {} {} - {}",
-                    ui::status("FAIL", false),
-                    assertion.id,
-                    assertion.detail
+                    "    {} {} {}",
+                    ui::paint("●", Tone::Error),
+                    ui::paint(&assertion.id, Tone::Strong),
+                    ui::paint(&assertion.detail, Tone::Muted)
                 );
             }
         }
@@ -735,21 +879,15 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
 }
 
 fn print_run_summary(passed: usize, failed: usize, runtime_errors: usize) {
-    println!("{}", ui::title("=== Results ==="));
+    println!("{}", ui::section("Results"));
     println!(
-        "{}{}",
-        ui::label("passed"),
-        ui::paint(&passed.to_string(), Tone::Success)
-    );
-    println!(
-        "{}{}",
-        ui::label("failed"),
-        ui::paint(&failed.to_string(), Tone::Error)
-    );
-    println!(
-        "{}{}",
-        ui::label("errors"),
-        ui::paint(&runtime_errors.to_string(), Tone::Error)
+        "  {} {}  {} {}  {} {}",
+        ui::paint("●", Tone::Success),
+        ui::paint(&format!("{passed} passed"), Tone::Success),
+        ui::paint("●", Tone::Error),
+        ui::paint(&format!("{failed} failed"), Tone::Error),
+        ui::paint("●", Tone::Warning),
+        ui::paint(&format!("{runtime_errors} errors"), Tone::Warning)
     );
     println!();
 }

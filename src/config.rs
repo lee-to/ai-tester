@@ -17,6 +17,7 @@ pub struct ProjectConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectDefaults {
+    pub runtime: Option<String>,
     pub model: Option<String>,
     pub permission_mode: Option<String>,
 }
@@ -29,6 +30,7 @@ struct RawProjectConfig {
 
 #[derive(Debug, Deserialize, Default)]
 struct RawProjectDefaults {
+    runtime: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
 }
@@ -66,6 +68,7 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             config_path: Some(config_path),
             skills_dir,
             defaults: ProjectDefaults {
+                runtime: raw.defaults.as_ref().and_then(|d| d.runtime.clone()),
                 model: raw.defaults.as_ref().and_then(|d| d.model.clone()),
                 permission_mode: raw.defaults.and_then(|d| d.permission_mode),
             },

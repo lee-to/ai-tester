@@ -111,6 +111,26 @@ fn cli_run_dry_run_loads_file_without_creating_runtime_sandbox() {
 }
 
 #[test]
+fn cli_run_file_accepts_scenario_path_without_yaml_extension() {
+    let tmp = TempDir::new().expect("temp dir");
+    let prompts = tmp.path().join("prompts");
+    fs::create_dir_all(&prompts).expect("prompts dir");
+    fs::write(
+        prompts.join("audit-ai-tester.yaml"),
+        "scenario: extensionless-file\nsystem_prompt: You are helpful.\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["run", "--file", "prompts/audit-ai-tester", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("extensionless-file"))
+        .stdout(predicate::str::contains("OK"));
+}
+
+#[test]
 fn cli_run_dry_run_loads_standalone_scenario_dir() {
     let tmp = TempDir::new().expect("temp dir");
     let prompts = tmp.path().join("prompts");
@@ -132,16 +152,16 @@ fn cli_run_dry_run_loads_standalone_scenario_dir() {
         .assert()
         .success()
         .stdout(predicate::str::contains("prompt-audit"))
-        .stdout(predicate::str::contains("Scenarios: 1"))
+        .stdout(predicate::str::contains("scenarios  1"))
         .stdout(predicate::str::contains("skipped").not());
 }
 
 #[test]
 fn cli_placeholder_commands_are_explicit_stubs() {
     for (command, expected) in [
-        ("trend", "trend: not implemented"),
-        ("compare", "compare: not implemented"),
-        ("trace", "trace: not implemented"),
+        ("trend", "ai-tester trend"),
+        ("compare", "ai-tester compare"),
+        ("trace", "ai-tester trace"),
     ] {
         let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
         let args = match command {
@@ -169,7 +189,7 @@ fn cli_history_reads_v2_traces_from_runs_dir() {
         .args(["history", "--last", "5"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Run history"))
+        .stdout(predicate::str::contains("ai-tester history"))
         .stdout(predicate::str::contains("synthetic/synthetic"));
 
     let mut json_cmd = Command::cargo_bin("ai-tester").expect("binary");
@@ -248,7 +268,7 @@ fn cli_run_with_fake_codex_prints_live_progress() {
         .stdout(predicate::str::contains("  progress"))
         .stdout(predicate::str::contains("[turn] started"))
         .stdout(predicate::str::contains("[assistant] message completed"))
-        .stdout(predicate::str::contains("  result     PASS"));
+        .stdout(predicate::str::contains("● PASS"));
 }
 
 #[test]
@@ -273,7 +293,7 @@ fn cli_run_fails_when_explicit_max_turns_is_hit() {
         .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("FAIL turn_budget"))
+        .stdout(predicate::str::contains("turn_budget"))
         .stdout(predicate::str::contains("FAIL"));
 }
 
@@ -285,14 +305,14 @@ fn cli_run_applies_project_defaults_to_omitted_runner_fields() {
     write_fake_codex(&bin_dir);
     fs::write(
         tmp.path().join(".ai-tester.yaml"),
-        "skills_dir: ./skills\ndefaults:\n  model: config-model\n  permission_mode: plan\n",
+        "skills_dir: ./skills\ndefaults:\n  runtime: codex\n  model: config-model\n  permission_mode: plan\n",
     )
     .expect("config written");
 
     let scenario = tmp.path().join("scenario.yaml");
     fs::write(
         &scenario,
-        "scenario: config-defaults\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+        "scenario: config-defaults\nsystem_prompt: You are helpful.\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
     )
     .expect("scenario written");
 
@@ -339,7 +359,7 @@ fn cli_run_with_fake_claude_question_does_not_false_pass_user_responses() {
         .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
         .assert()
         .code(1)
-        .stdout(predicate::str::contains("FAIL no_unanswered_questions"))
+        .stdout(predicate::str::contains("no_unanswered_questions"))
         .stdout(predicate::str::contains("FAIL"));
 }
 

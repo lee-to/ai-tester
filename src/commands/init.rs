@@ -3,6 +3,8 @@ use std::path::Path;
 
 use anyhow::bail;
 
+use crate::ui::{self, Tone};
+
 pub struct InitOptions {
     pub force: bool,
     pub skills_dir: String,
@@ -29,6 +31,12 @@ pub fn init_command(opts: InitOptions) -> anyhow::Result<i32> {
         opts.skills_dir, opts.model, opts.permission_mode
     );
     fs::write(path, content)?;
-    println!("Created {}", path.display());
+    println!("{}", ui::header("ai-tester", "init"));
+    println!(
+        "  {} {}",
+        ui::paint("●", Tone::Success),
+        ui::paint("Created", Tone::Strong)
+    );
+    println!("  {}", ui::kv("config", path.display()));
     Ok(0)
 }

@@ -89,6 +89,7 @@ pub struct LoadedScenario {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScenarioSourceMeta {
+    pub runner_runtime_set: bool,
     pub runner_model_set: bool,
     pub runner_permission_mode_set: bool,
 }
@@ -110,6 +111,9 @@ fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
     let value = yaml_serde::from_str::<Value>(raw).unwrap_or(Value::Null);
     let runner = value.get("runner");
     ScenarioSourceMeta {
+        runner_runtime_set: runner
+            .and_then(|runner| runner.get("runtime"))
+            .is_some_and(|value| !value.is_null()),
         runner_model_set: runner
             .and_then(|runner| runner.get("model"))
             .is_some_and(|value| !value.is_null()),

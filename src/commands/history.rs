@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::trace::TraceRecord;
+use crate::ui::{self, Tone};
 
 #[derive(Debug, Clone)]
 pub struct HistoryOptions {
@@ -35,7 +36,12 @@ struct HistoryEntry {
 pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
     let runs_dir = std::env::current_dir()?.join("runs");
     if !runs_dir.is_dir() {
-        println!("No runs/ directory found - run some scenarios first.");
+        println!("{}", ui::header("ai-tester", "history"));
+        println!(
+            "  {} {}",
+            ui::paint("●", Tone::Warning),
+            ui::paint("No runs/ directory found", Tone::Muted)
+        );
         return Ok(0);
     }
 
@@ -73,24 +79,38 @@ pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
     }
 
     if shown.is_empty() {
-        println!("No runs matched.");
+        println!("{}", ui::header("ai-tester", "history"));
+        println!(
+            "  {} {}",
+            ui::paint("●", Tone::Warning),
+            ui::paint("No runs matched", Tone::Muted)
+        );
         return Ok(0);
     }
 
-    println!("=== Run history === (showing {})", shown.len());
+    println!("{}", ui::header("ai-tester", "history"));
+    println!("  {}", ui::kv("showing", shown.len()));
+    println!("  {}", ui::kv("trace", "use `ai-tester trace <run_id>`"));
     println!();
     for entry in &shown {
-        let mark = if entry.overall_pass { "OK" } else { "FAIL" };
-        println!(
-            "  {mark} {}  {}/{}  {}t  {} calls  {} tok  ~${:.4}",
-            entry.finished_at,
-            entry.skill,
-            entry.scenario,
-            entry.turns_used,
-            entry.tool_calls_total,
-            entry.tokens_total,
-            entry.usd_estimate
+        let mark = ui::paint(
+            "●",
+            if entry.overall_pass {
+                Tone::Success
+            } else {
+                Tone::Error
+            },
         );
+        println!(
+            "  {mark} {}  {}  {}  {}  {}  {}",
+            entry.finished_at,
+            ui::paint(&format!("{}/{}", entry.skill, entry.scenario), Tone::Strong),
+            ui::paint(&format!("{}t", entry.turns_used), Tone::Muted),
+            ui::paint(&format!("{} calls", entry.tool_calls_total), Tone::Muted),
+            ui::paint(&format!("{} tok", entry.tokens_total), Tone::Muted),
+            ui::paint(&format!("~${:.4}", entry.usd_estimate), Tone::Muted)
+        );
+        println!("    {}", ui::kv("run_id", &entry.run_id));
     }
     Ok(0)
 }

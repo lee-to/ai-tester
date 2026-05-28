@@ -58,6 +58,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    #[command(about = "Not implemented yet: planned score trend from runs/*.json")]
     Trend {
         skill: String,
         #[arg(long)]
@@ -65,14 +66,17 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         last: usize,
     },
+    #[command(about = "Not implemented yet: planned side-by-side run diff")]
     Compare {
         run_a: String,
         run_b: String,
     },
+    #[command(about = "Not implemented yet: planned pretty trace viewer")]
     Trace {
         run_id: String,
     },
     Runtimes,
+    #[command(about = "Not implemented yet: planned orphan sandbox cleanup")]
     SandboxPrune {
         #[arg(long)]
         yes: bool,
@@ -135,11 +139,23 @@ pub fn main_entry() -> anyhow::Result<()> {
         Commands::Compare { .. } => crate::commands::stubs::compare_command(),
         Commands::Trace { .. } => crate::commands::stubs::trace_command(),
         Commands::Runtimes => {
+            println!("{}", crate::ui::header("ai-tester", "runtimes"));
             for status in crate::runtime::list_runtime_statuses() {
+                let tone = if status.ready {
+                    crate::ui::Tone::Success
+                } else {
+                    crate::ui::Tone::Error
+                };
                 let label = if status.ready { "ready" } else { "not-ready" };
-                println!("  {:<10} {:<9} {}", status.name, label, status.description);
+                println!(
+                    "  {} {} {} {}",
+                    crate::ui::paint("●", tone),
+                    crate::ui::paint(status.name, crate::ui::Tone::Warning),
+                    crate::ui::paint(label, tone),
+                    crate::ui::paint(status.description, crate::ui::Tone::Muted)
+                );
                 if let Some(message) = status.message {
-                    println!("             {message}");
+                    println!("    {}", crate::ui::kv("reason", message));
                 }
             }
             0

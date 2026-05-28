@@ -46,6 +46,7 @@ fn scenario_loader_tracks_explicit_runner_fields() {
     .expect("scenario written");
 
     let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
+    assert!(loaded.source_meta.runner_runtime_set);
     assert!(!loaded.source_meta.runner_model_set);
     assert!(!loaded.source_meta.runner_permission_mode_set);
 
@@ -55,6 +56,7 @@ fn scenario_loader_tracks_explicit_runner_fields() {
     )
     .expect("scenario written");
     let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
+    assert!(!loaded.source_meta.runner_runtime_set);
     assert!(loaded.source_meta.runner_model_set);
     assert!(loaded.source_meta.runner_permission_mode_set);
 }
