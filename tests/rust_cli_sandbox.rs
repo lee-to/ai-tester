@@ -111,6 +111,32 @@ fn cli_run_dry_run_loads_file_without_creating_runtime_sandbox() {
 }
 
 #[test]
+fn cli_run_dry_run_loads_standalone_scenario_dir() {
+    let tmp = TempDir::new().expect("temp dir");
+    let prompts = tmp.path().join("prompts");
+    fs::create_dir_all(&prompts).expect("prompts dir");
+    fs::write(
+        prompts.join("audit.yaml"),
+        "scenario: prompt-audit\nsystem_prompt: You are helpful.\nassertions: []\n",
+    )
+    .expect("scenario written");
+    fs::write(
+        prompts.join("_draft.yaml"),
+        "scenario: skipped\nsystem_prompt: You are helpful.\nassertions: []\n",
+    )
+    .expect("draft written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["run", "--dir", "prompts", "--dry-run"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("prompt-audit"))
+        .stdout(predicate::str::contains("Scenarios: 1"))
+        .stdout(predicate::str::contains("skipped").not());
+}
+
+#[test]
 fn cli_placeholder_commands_are_explicit_stubs() {
     for (command, expected) in [
         ("trend", "trend: not implemented"),
@@ -194,6 +220,35 @@ fn cli_run_with_fake_codex_writes_trace_and_evaluates_assertions() {
     let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
     assert!(trace_json.contains("\"schemaVersion\": \"2.0.0\""));
     assert!(trace_json.contains("\"overallPass\": true"));
+}
+
+#[test]
+fn cli_run_with_fake_codex_prints_live_progress() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-codex-progress\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[1/1] fake-codex-progress"))
+        .stdout(predicate::str::contains("  progress"))
+        .stdout(predicate::str::contains("[turn] started"))
+        .stdout(predicate::str::contains("[assistant] message completed"))
+        .stdout(predicate::str::contains("  result     PASS"));
 }
 
 #[test]
@@ -344,6 +399,7 @@ fn write_fake_codex(bin_dir: &Path) {
         fs::write(
             path,
             "@echo off\r\n\
+echo %* | findstr \" -a \" >nul && (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
 echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
 echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\r\n\
@@ -358,6 +414,7 @@ echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\
         fs::write(
             &path,
             "#!/bin/sh\n\
+case \" $* \" in *\" -a \"*) echo 'unexpected legacy approval flag' >&2; exit 2;; esac\n\
 cat >/dev/null\n\
 echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\
@@ -378,6 +435,7 @@ fn write_fake_codex_two_turns(bin_dir: &Path) {
         fs::write(
             path,
             "@echo off\r\n\
+echo %* | findstr \" -a \" >nul && (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
 echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
@@ -393,6 +451,7 @@ echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\
         fs::write(
             &path,
             "#!/bin/sh\n\
+case \" $* \" in *\" -a \"*) echo 'unexpected legacy approval flag' >&2; exit 2;; esac\n\
 cat >/dev/null\n\
 echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
 echo '{\"type\":\"turn.started\"}'\n\

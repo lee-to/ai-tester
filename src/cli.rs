@@ -33,6 +33,8 @@ enum Commands {
         #[arg(long)]
         file: Option<PathBuf>,
         #[arg(long)]
+        dir: Option<PathBuf>,
+        #[arg(long)]
         model: Option<String>,
         #[arg(long)]
         runtime: Option<String>,
@@ -97,6 +99,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             skill,
             scenario,
             file,
+            dir,
             model,
             runtime,
             filter,
@@ -108,6 +111,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             skill,
             scenario,
             file,
+            dir,
             model,
             runtime,
             filter,

@@ -139,12 +139,122 @@ fn assertions_evaluate_tool_calls_output_turns_and_token_budget() {
         ),
         AssertionSpec::no_tool_called("no-write", "Write"),
         AssertionSpec::output_contains("mentions-feat", "\\bfeat\\b"),
+        AssertionSpec::no_output_contains("no-regression", "panic|error"),
         AssertionSpec::turn_count_at_most("efficient", 6),
     ];
 
     let results = evaluate_assertions(&assertions, &trace);
     assert!(results.iter().all(|r| r.pass), "{results:#?}");
     assert_eq!(compute_weighted_score(&results), 1.0);
+}
+
+#[test]
+fn tool_called_accepts_tool_pattern() {
+    let yaml = "scenario: pattern\nsystem_prompt: Body\nassertions:\n  - id: codegraph\n    type: tool_called\n    tool_pattern: '^mcp__.*__codegraph_context$'\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "1",
+            "mcp__ai_workspace__codegraph_context",
+            serde_json::json!({"task": "find bug"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "codegraph")
+        .expect("assertion result");
+    assert!(result.pass, "{results:#?}");
+}
+
+#[test]
+fn no_output_contains_fails_when_final_output_matches() {
+    let trace = TraceRecord::synthetic(Vec::new(), "WARN [+check] failed".to_string(), 1, None);
+    let assertions = vec![AssertionSpec::no_output_contains(
+        "no-check-warning",
+        "WARN \\[\\+check\\]",
+    )];
+
+    let results = evaluate_assertions(&assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "no-check-warning")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
+    assert_eq!(result.kind, "no_output_contains");
+}
+
+#[test]
+fn file_read_matches_claude_read_and_codex_bash_readers() {
+    let assertions = vec![AssertionSpec::file_read(
+        "reads-runtime",
+        "src/runtime/mod\\.rs",
+    )];
+
+    let claude_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "read-1",
+            "Read",
+            serde_json::json!({"file_path": "src/runtime/mod.rs"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let claude_results = evaluate_assertions(&assertions, &claude_trace);
+    assert!(
+        claude_results
+            .iter()
+            .any(|result| result.id == "reads-runtime" && result.pass),
+        "{claude_results:#?}"
+    );
+
+    let codex_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "bash-1",
+            "Bash",
+            serde_json::json!({"command": "sed -n '1,220p' src/runtime/mod.rs"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let codex_results = evaluate_assertions(&assertions, &codex_trace);
+    assert!(
+        codex_results
+            .iter()
+            .any(|result| result.id == "reads-runtime" && result.pass),
+        "{codex_results:#?}"
+    );
+}
+
+#[test]
+fn file_read_does_not_match_non_reader_bash_mentions() {
+    let trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "bash-1",
+            "Bash",
+            serde_json::json!({"command": "cargo test src/runtime/mod.rs"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let assertions = vec![AssertionSpec::file_read(
+        "reads-runtime",
+        "src/runtime/mod\\.rs",
+    )];
+
+    let results = evaluate_assertions(&assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "reads-runtime")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
 }
 
 #[test]

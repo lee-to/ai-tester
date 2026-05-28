@@ -21,7 +21,7 @@ LLM tests that mock the model are easy to write and weak at catching production 
 - **Multi-runtime.** Built-in adapters for Claude Code and OpenAI Codex through their installed CLIs.
 - **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file.
 - **Scripted user turns.** Use `user_prompt` or `user_prompts` for custom session flow.
-- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `turn_count_at_most`, and `no_path_escape`.
+- **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `no_output_contains`, `file_read`, `turn_count_at_most`, and `no_path_escape`.
 - **Fixtures.** Inline files, `content_from`, directory trees, staged changes, committed baselines, and setup commands.
 - **Trace output.** Every live run writes a schema `2.0.0` JSON trace under `runs/`.
 - **History view.** `ai-tester history` summarizes prior v2 traces.
@@ -73,6 +73,9 @@ ai-tester run
 
 # 4. Run one standalone scenario file
 ai-tester run --file ./scenario.yaml --runtime codex
+
+# 5. Run standalone scenarios from a directory
+ai-tester run --dir ./prompts --runtime codex
 ```
 
 ## Project Config
@@ -103,12 +106,14 @@ ai-tester init --force --skills-dir ./agent-skills --model gpt-5-codex --permiss
 # Validate without creating a sandbox or runtime process
 ai-tester run [skill] --dry-run
 ai-tester run --file ./scenario.yaml --dry-run
+ai-tester run --dir ./prompts --dry-run
 
 # Run scenarios
 ai-tester run
 ai-tester run <skill>
 ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
+ai-tester run --dir ./prompts --runtime codex
 
 # Inspect history
 ai-tester history
@@ -120,6 +125,8 @@ ai-tester runtimes
 ai-tester sandbox-prune
 ai-tester sandbox-prune --yes --min-age 300
 ```
+
+Interactive runs use colorized output when stdout is a terminal. Set `NO_COLOR=1` to disable colors, or `AI_TESTER_FORCE_COLOR=1` to force ANSI colors in captured logs.
 
 Placeholder commands currently kept for CLI shape:
 
@@ -267,6 +274,10 @@ Order of operations:
   tool: Bash
   args_match:
     command: "^git status"
+
+- id: calls-codegraph
+  type: tool_called
+  tool_pattern: "^mcp__.*__codegraph_context$"
 ```
 
 ### `tool_call_sequence`
@@ -303,6 +314,24 @@ Order of operations:
   pattern: "(?i)done"
 ```
 
+### `no_output_contains`
+
+```yaml
+- id: no-warning
+  type: no_output_contains
+  pattern: "WARN \\[\\+check\\]"
+```
+
+### `file_read`
+
+Runtime-neutral check that a file was actually inspected. It matches Claude `Read(file_path)` and Codex `Bash(command)` reader commands such as `sed`, `cat`, `nl`, `rg`, `grep`, `head`, and `tail`.
+
+```yaml
+- id: reads-runtime
+  type: file_read
+  path: "src/runtime/mod\\.rs"
+```
+
 ### `turn_count_at_most`
 
 ```yaml
@@ -325,7 +354,7 @@ Implicit assertions:
 
 ## Regex Semantics
 
-`args_match`, `match_question`, and `output_contains` support leading inline flags:
+`args_match`, `match_question`, `output_contains`, and `no_output_contains` support leading inline flags:
 
 - `(?i)` case-insensitive
 - `(?m)` multi-line
@@ -346,17 +375,17 @@ The Rust rewrite uses external CLIs and parses JSONL output. It does not embed t
 The Codex adapter runs:
 
 ```bash
-codex exec --json --skip-git-repo-check --cd <sandbox> -a never -s <sandbox-mode>
+codex exec --json --skip-git-repo-check --cd <sandbox> --sandbox <sandbox-mode>
 ```
 
 Permission mapping:
 
-| Scenario `permission_mode` | Codex sandbox |
+| Scenario `permission_mode` | Codex args |
 | --- | --- |
-| `bypassPermissions` | `danger-full-access` |
-| `acceptEdits` | `workspace-write` |
-| `plan` | `read-only` |
-| `default` | `workspace-write` |
+| `bypassPermissions` | `--dangerously-bypass-approvals-and-sandbox` |
+| `acceptEdits` | `--sandbox workspace-write` |
+| `plan` | `--sandbox read-only` |
+| `default` | `--sandbox workspace-write` |
 
 For `user_prompts`, later turns use `codex exec resume`.
 

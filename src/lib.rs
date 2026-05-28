@@ -7,4 +7,5 @@ pub mod sandbox;
 pub mod scenario;
 pub mod skill;
 pub mod trace;
+pub mod ui;
 pub mod util;

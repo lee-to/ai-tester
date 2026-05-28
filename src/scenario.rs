@@ -244,7 +244,8 @@ pub enum AssertionSpec {
         id: String,
         #[serde(default = "default_weight")]
         weight: f64,
-        tool: String,
+        tool: Option<String>,
+        tool_pattern: Option<String>,
         args_match: Option<BTreeMap<String, String>>,
         call_index: Option<usize>,
         capture: Option<Vec<String>>,
@@ -271,6 +272,18 @@ pub enum AssertionSpec {
         weight: f64,
         pattern: String,
     },
+    NoOutputContains {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        pattern: String,
+    },
+    FileRead {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+    },
     TurnCountAtMost {
         id: String,
         #[serde(default = "default_weight")]
@@ -293,6 +306,8 @@ impl AssertionSpec {
             | Self::ToolCallSequence { id, .. }
             | Self::NoToolCalled { id, .. }
             | Self::OutputContains { id, .. }
+            | Self::NoOutputContains { id, .. }
+            | Self::FileRead { id, .. }
             | Self::TurnCountAtMost { id, .. }
             | Self::NoPathEscape { id, .. } => id,
         }
@@ -304,6 +319,8 @@ impl AssertionSpec {
             | Self::ToolCallSequence { weight, .. }
             | Self::NoToolCalled { weight, .. }
             | Self::OutputContains { weight, .. }
+            | Self::NoOutputContains { weight, .. }
+            | Self::FileRead { weight, .. }
             | Self::TurnCountAtMost { weight, .. }
             | Self::NoPathEscape { weight, .. } => *weight,
         }
@@ -313,7 +330,8 @@ impl AssertionSpec {
         Self::ToolCalled {
             id: id.to_string(),
             weight: 1.0,
-            tool: tool.to_string(),
+            tool: Some(tool.to_string()),
+            tool_pattern: None,
             args_match: json_object_to_regex_map(args_match),
             call_index: None,
             capture: None,
@@ -339,11 +357,27 @@ impl AssertionSpec {
         }
     }
 
+    pub fn no_output_contains(id: &str, pattern: &str) -> Self {
+        Self::NoOutputContains {
+            id: id.to_string(),
+            weight: 1.0,
+            pattern: pattern.to_string(),
+        }
+    }
+
     pub fn turn_count_at_most(id: &str, max: u32) -> Self {
         Self::TurnCountAtMost {
             id: id.to_string(),
             weight: 1.0,
             max,
+        }
+    }
+
+    pub fn file_read(id: &str, path: &str) -> Self {
+        Self::FileRead {
+            id: id.to_string(),
+            weight: 1.0,
+            path: path.to_string(),
         }
     }
 }
@@ -378,6 +412,11 @@ fn json_object_to_regex_map(value: Value) -> Option<BTreeMap<String, String>> {
 
 pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
     match spec {
+        AssertionSpec::ToolCalled {
+            tool, tool_pattern, ..
+        } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
+            "tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+        )),
         AssertionSpec::ToolCallSequence { sequence, .. } if sequence.is_empty() => Err(anyhow!(
             "tool_call_sequence assertion must declare at least one step"
         )),
@@ -385,6 +424,9 @@ pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
             tool, tool_pattern, ..
         } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
             "no_tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+        )),
+        AssertionSpec::FileRead { path, .. } if path.trim().is_empty() => Err(anyhow!(
+            "file_read assertion must declare non-empty `path` regex"
         )),
         _ => Ok(()),
     }

@@ -68,10 +68,19 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             id,
             weight,
             tool,
+            tool_pattern,
             args_match,
             call_index,
             ..
-        } => evaluate_tool_called(id, *weight, tool, args_match.as_ref(), *call_index, trace),
+        } => evaluate_tool_called(
+            id,
+            *weight,
+            tool.as_deref(),
+            tool_pattern.as_deref(),
+            args_match.as_ref(),
+            *call_index,
+            trace,
+        ),
         AssertionSpec::ToolCallSequence {
             id,
             weight,
@@ -162,6 +171,36 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
                 format!("invalid regex: {err}"),
             ),
         },
+        AssertionSpec::NoOutputContains {
+            id,
+            weight,
+            pattern,
+        } => match compile_pattern(pattern) {
+            Ok(re) if re.is_match(&trace.final_output) => base_result(
+                id,
+                "no_output_contains",
+                false,
+                *weight,
+                "final output matched unexpected pattern".to_string(),
+            ),
+            Ok(_) => base_result(
+                id,
+                "no_output_contains",
+                true,
+                *weight,
+                "final output did not match pattern".to_string(),
+            ),
+            Err(err) => base_result(
+                id,
+                "no_output_contains",
+                false,
+                *weight,
+                format!("invalid regex: {err}"),
+            ),
+        },
+        AssertionSpec::FileRead { id, weight, path } => {
+            evaluate_file_read(id, *weight, path, trace)
+        }
         AssertionSpec::TurnCountAtMost { id, weight, max } => {
             let pass = trace.runner.turns_used <= *max;
             base_result(
@@ -189,6 +228,73 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             trace,
         ),
     }
+}
+
+fn evaluate_file_read(
+    id: &str,
+    weight: f64,
+    path_pattern: &str,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let path_re = match compile_pattern(path_pattern) {
+        Ok(pattern) => pattern,
+        Err(err) => {
+            return base_result(
+                id,
+                "file_read",
+                false,
+                weight,
+                format!("invalid path regex: {err}"),
+            )
+        }
+    };
+
+    let matched = all_tool_calls(trace)
+        .into_iter()
+        .find(|call| file_read_call_matches(call, &path_re));
+
+    if let Some(call) = matched {
+        base_result(
+            id,
+            "file_read",
+            true,
+            weight,
+            format!("found file read via `{}`", call.name),
+        )
+    } else {
+        base_result(
+            id,
+            "file_read",
+            false,
+            weight,
+            format!("no file read matched `{path_pattern}`"),
+        )
+    }
+}
+
+fn file_read_call_matches(call: &ToolCallRecord, path_re: &regex::Regex) -> bool {
+    match call.name.as_str() {
+        "Read" | "NotebookRead" => call
+            .input
+            .get("file_path")
+            .map(value_to_string)
+            .is_some_and(|path| path_re.is_match(&path)),
+        "Bash" => call
+            .input
+            .get("command")
+            .map(value_to_string)
+            .is_some_and(|command| bash_command_reads_path(&command, path_re)),
+        _ => false,
+    }
+}
+
+fn bash_command_reads_path(command: &str, path_re: &regex::Regex) -> bool {
+    if !path_re.is_match(command) {
+        return false;
+    }
+
+    compile_pattern(r#"(?i)(^|[\s'";|(&])(?:awk|bat|cat|grep|head|less|more|nl|rg|sed|tail)\b"#)
+        .is_ok_and(|reader| reader.is_match(command))
 }
 
 fn evaluate_no_path_escape(
@@ -256,14 +362,34 @@ fn evaluate_no_path_escape(
 fn evaluate_tool_called(
     id: &str,
     weight: f64,
-    tool: &str,
+    tool: Option<&str>,
+    tool_pattern: Option<&str>,
     expected_args: Option<&BTreeMap<String, String>>,
     call_index: Option<usize>,
     trace: &TraceRecord,
 ) -> AssertionResult {
+    let pattern = match tool_pattern {
+        Some(pattern) => match compile_pattern(pattern) {
+            Ok(pattern) => Some(pattern),
+            Err(err) => {
+                return base_result(
+                    id,
+                    "tool_called",
+                    false,
+                    weight,
+                    format!("invalid tool_pattern regex: {err}"),
+                )
+            }
+        },
+        None => None,
+    };
     let matches = all_tool_calls(trace)
         .into_iter()
-        .filter(|call| call.name == tool && args_match(expected_args, &call.input).unwrap_or(false))
+        .filter(|call| {
+            let tool_ok = tool.is_some_and(|tool| call.name == tool)
+                || pattern.as_ref().is_some_and(|re| re.is_match(&call.name));
+            tool_ok && args_match(expected_args, &call.input).unwrap_or(false)
+        })
         .collect::<Vec<_>>();
     let pass = call_index
         .map(|idx| matches.get(idx).is_some())
@@ -274,9 +400,9 @@ fn evaluate_tool_called(
         pass,
         weight,
         if pass {
-            format!("found `{tool}` call")
+            format!("found `{}` call", tool.unwrap_or("<matching pattern>"))
         } else {
-            format!("no `{tool}` call matched")
+            format!("no `{}` call matched", tool.unwrap_or("<matching pattern>"))
         },
     )
 }

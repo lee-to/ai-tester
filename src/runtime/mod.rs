@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::scenario::{Scenario, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
+use crate::ui::{self, Tone};
 
 pub struct RuntimeStatus {
     pub name: &'static str,
@@ -27,6 +28,12 @@ pub struct RuntimeRunResult {
     pub stopped_reason: String,
     pub errors: Vec<TraceError>,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProcessOutputMode {
+    Buffered,
+    StreamJsonl,
 }
 
 impl RuntimeRunResult {
@@ -487,6 +494,7 @@ pub struct RuntimeRunRequest {
     pub user_responses: Vec<UserResponse>,
     pub allowed_tools: Vec<String>,
     pub skill_install_rel_path: Option<String>,
+    pub progress: bool,
 }
 
 pub fn runtime_ready(name: &str) -> bool {
@@ -521,37 +529,18 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             user_message.clone()
         };
         let stdout = if idx == 0 {
-            run_process_with_stdin(
-                "codex",
-                &[
-                    "exec".to_string(),
-                    "--json".to_string(),
-                    "--skip-git-repo-check".to_string(),
-                    "--cd".to_string(),
-                    req.cwd.display().to_string(),
-                    "-a".to_string(),
-                    "never".to_string(),
-                    "-s".to_string(),
-                    map_codex_permission_mode(&req.scenario.runner.permission_mode).to_string(),
-                    "-m".to_string(),
-                    req.scenario.runner.model.clone(),
-                    "-".to_string(),
-                ],
-                &prompt,
-            )?
+            let args = build_codex_args(&req);
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
         } else {
             let session = session_id.clone().unwrap_or_else(|| "--last".to_string());
-            run_process_with_stdin(
-                "codex",
-                &[
-                    "exec".to_string(),
-                    "resume".to_string(),
-                    session,
-                    "--json".to_string(),
-                    "-".to_string(),
-                ],
-                &prompt,
-            )?
+            let args = vec![
+                "exec".to_string(),
+                "resume".to_string(),
+                session,
+                "--json".to_string(),
+                "-".to_string(),
+            ];
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
         };
         let parsed = parse_codex_jsonl(&stdout, max_turns, max_turns_user_set)?;
         if session_id.is_none() {
@@ -564,6 +553,32 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
         combined.stopped_reason = "end_turn".to_string();
     }
     Ok(combined)
+}
+
+fn build_codex_args(req: &RuntimeRunRequest) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--json".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "--cd".to_string(),
+        req.cwd.display().to_string(),
+    ];
+    append_codex_permission_args(&mut args, &req.scenario.runner.permission_mode);
+    args.extend([
+        "-m".to_string(),
+        req.scenario.runner.model.clone(),
+        "-".to_string(),
+    ]);
+    args
+}
+
+fn append_codex_permission_args(args: &mut Vec<String>, mode: &str) {
+    if mode == "bypassPermissions" {
+        args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
+    } else {
+        args.push("-s".to_string());
+        args.push(map_codex_permission_mode(mode).to_string());
+    }
 }
 
 fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
@@ -582,7 +597,13 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             user_message,
             idx == 0,
         );
-        let stdout = run_process("claude", &args, Some(&req.cwd), None)?;
+        let stdout = run_process(
+            "claude",
+            &args,
+            Some(&req.cwd),
+            None,
+            ProcessOutputMode::Buffered,
+        )?;
         let parsed = parse_claude_jsonl_with_user_responses(
             &stdout,
             max_turns,
@@ -601,8 +622,23 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
     Ok(combined)
 }
 
-fn run_process_with_stdin(command: &str, args: &[String], stdin: &str) -> anyhow::Result<String> {
-    run_process(command, args, None, Some(stdin))
+fn run_process_with_stdin_jsonl(
+    command: &str,
+    args: &[String],
+    stdin: &str,
+    progress: bool,
+) -> anyhow::Result<String> {
+    run_process(
+        command,
+        args,
+        None,
+        Some(stdin),
+        if progress {
+            ProcessOutputMode::StreamJsonl
+        } else {
+            ProcessOutputMode::Buffered
+        },
+    )
 }
 
 fn run_process(
@@ -610,6 +646,7 @@ fn run_process(
     args: &[String],
     cwd: Option<&std::path::Path>,
     stdin: Option<&str>,
+    output_mode: ProcessOutputMode,
 ) -> anyhow::Result<String> {
     let mut process = platform_command(command, args);
     if let Some(cwd) = cwd {
@@ -627,14 +664,123 @@ fn run_process(
             .expect("stdin piped")
             .write_all(stdin.as_bytes())?;
     }
-    let output = child.wait_with_output()?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "{command} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    drop(child.stdin.take());
+
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buffer = String::new();
+        let mut reader = BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut buffer);
+        buffer
+    });
+
+    let stdout = match output_mode {
+        ProcessOutputMode::Buffered => read_stdout_buffered(stdout)?,
+        ProcessOutputMode::StreamJsonl => read_stdout_streaming_jsonl(stdout)?,
+    };
+
+    let status = child.wait()?;
+    let stderr = stderr_handle.join().unwrap_or_default();
+    if !status.success() {
+        anyhow::bail!("{command} failed: {}", stderr.trim());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(stdout)
+}
+
+fn read_stdout_buffered(stdout: impl Read) -> anyhow::Result<String> {
+    let mut buffer = String::new();
+    let mut reader = BufReader::new(stdout);
+    reader.read_to_string(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn read_stdout_streaming_jsonl(stdout: impl Read) -> anyhow::Result<String> {
+    let mut captured = String::new();
+    let reader = BufReader::new(stdout);
+    for line in reader.lines() {
+        let line = line?;
+        print_jsonl_progress(&line);
+        captured.push_str(&line);
+        captured.push('\n');
+    }
+    Ok(captured)
+}
+
+fn print_jsonl_progress(line: &str) {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    match event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "turn.started" => println!("    {} started", ui::tag("turn", Tone::Info)),
+        "turn.completed" => println!("    {} completed", ui::tag("turn", Tone::Success)),
+        "turn.failed" => println!("    {} failed", ui::tag("turn", Tone::Error)),
+        "item.started" => {
+            if let Some(item) = event.get("item") {
+                print_item_progress("started", item);
+            }
+        }
+        "item.completed" => {
+            if let Some(item) = event.get("item") {
+                print_item_progress("completed", item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn print_item_progress(state: &str, item: &Value) {
+    match item.get("type").and_then(Value::as_str).unwrap_or_default() {
+        "command_execution" => {
+            let suffix = item
+                .get("command")
+                .and_then(Value::as_str)
+                .map(|command| format!(": {}", truncate_progress_value(command, 140)))
+                .unwrap_or_default();
+            println!("    {} Bash {state}{suffix}", ui::tag("tool", Tone::Accent));
+        }
+        "file_change" => {
+            if let Some(changes) = item.get("changes").and_then(Value::as_array) {
+                let paths = changes
+                    .iter()
+                    .filter_map(|change| change.get("path").and_then(Value::as_str))
+                    .collect::<Vec<_>>();
+                if !paths.is_empty() {
+                    println!(
+                        "    {} changes {state}: {}",
+                        ui::tag("file", Tone::Warning),
+                        truncate_progress_value(&paths.join(", "), 140)
+                    );
+                }
+            }
+        }
+        "agent_message" if state == "completed" => {
+            println!(
+                "    {} message completed",
+                ui::tag("assistant", Tone::Success)
+            )
+        }
+        other if !other.is_empty() => {
+            println!("    {} {other} {state}", ui::tag("item", Tone::Muted))
+        }
+        _ => {}
+    }
+}
+
+fn truncate_progress_value(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
 }
 
 #[cfg(windows)]
@@ -841,6 +987,7 @@ mod tests {
             user_responses: Vec::new(),
             allowed_tools: vec!["Read".to_string(), "Bash(git *)".to_string()],
             skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
+            progress: false,
         };
 
         let args = build_claude_args(&req, 3, None, "do it", true);
