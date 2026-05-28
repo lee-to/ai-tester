@@ -28,6 +28,10 @@ jobs:
             target: x86_64-apple-darwin
             artifact: ai-tester-macos-x86_64
             binary: target/x86_64-apple-darwin/release/ai-tester
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: ai-tester-macos-aarch64
+            binary: target/aarch64-apple-darwin/release/ai-tester
 
     steps:
       - uses: actions/checkout@v4
@@ -67,6 +71,7 @@ jobs:
           mkdir -p release-assets
           cp dist/ai-tester-linux-x86_64/ai-tester release-assets/ai-tester-linux-x86_64
           cp dist/ai-tester-macos-x86_64/ai-tester release-assets/ai-tester-macos-x86_64
+          cp dist/ai-tester-macos-aarch64/ai-tester release-assets/ai-tester-macos-aarch64
           cp dist/ai-tester-windows-x86_64.exe/ai-tester.exe release-assets/ai-tester-windows-x86_64.exe
           ls -la release-assets
 
