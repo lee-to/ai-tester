@@ -8,7 +8,7 @@ body:
       value: |
         Thanks for taking the time to file a bug report. Please fill out the sections below so we can reproduce the issue quickly.
 
-        For **security vulnerabilities**, do NOT file a public issue — follow the [Security Policy](https://github.com/lee-to/ai-tester/blob/2.x/SECURITY.md) instead.
+        For **security vulnerabilities**, do NOT file a public issue — follow the [Security Policy](https://github.com/lee-to/ai-tester/blob/1.x/SECURITY.md) instead.
 
   - type: input
     id: version
