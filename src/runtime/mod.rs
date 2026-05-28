@@ -942,7 +942,7 @@ impl LiveProgress {
                 let message = truncate_progress_for_terminal(&message, 8);
                 if let Ok(_guard) = thread_output_lock.lock() {
                     if thread_needs_gap.swap(false, Ordering::Relaxed) {
-                        print!("\n");
+                        println!();
                         thread_gap_rendered.store(true, Ordering::Relaxed);
                     }
                     print!(
