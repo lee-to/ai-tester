@@ -419,7 +419,12 @@ fn write_fake_codex(bin_dir: &Path) {
         fs::write(
             path,
             "@echo off\r\n\
-echo %* | findstr \" -a \" >nul && (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
+:check_args\r\n\
+if \"%~1\"==\"\" goto after_args\r\n\
+if \"%~1\"==\"-a\" (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
+shift\r\n\
+goto check_args\r\n\
+:after_args\r\n\
 echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
 echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\r\n\
@@ -455,7 +460,12 @@ fn write_fake_codex_two_turns(bin_dir: &Path) {
         fs::write(
             path,
             "@echo off\r\n\
-echo %* | findstr \" -a \" >nul && (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
+:check_args\r\n\
+if \"%~1\"==\"\" goto after_args\r\n\
+if \"%~1\"==\"-a\" (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
+shift\r\n\
+goto check_args\r\n\
+:after_args\r\n\
 echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
 echo {\"type\":\"turn.started\"}\r\n\
