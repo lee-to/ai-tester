@@ -119,6 +119,12 @@ ai-tester run --dir ./prompts --runtime codex
 ai-tester history
 ai-tester history <skill> --scenario <scenario-id> --last 10
 ai-tester history --json
+ai-tester trend <skill> --scenario <scenario-id> --last 20
+ai-tester trend <skill> --json
+ai-tester trace <run-id>
+ai-tester trace <run-id> --json
+ai-tester compare <run-a> <run-b>
+ai-tester compare <run-a> <run-b> --json
 
 # Runtime and housekeeping
 ai-tester runtimes
@@ -415,9 +421,18 @@ Trace records include:
 ```bash
 ai-tester history
 ai-tester history --json
+ai-tester trend <skill> --scenario <scenario-id> --last 10
+ai-tester trace <run-id>
+ai-tester compare <run-a> <run-b>
 ```
 
 History reads v2 traces under `runs/` and prints newest runs first.
+
+`trend` reads v2 traces for one skill and prints the latest matching runs in chronological order. Use `--scenario` to narrow the series, `--last <n>` to cap the latest runs, and `--json` for machine-readable summaries.
+
+`trace` pretty-prints one recorded run by `run_id`, JSON filename stem, or file path. Human output summarizes metadata, assertions, tool-call counts, turn timeline, errors, and a final-output preview; `--json` emits the full trace record.
+
+`compare` diffs two recorded runs by `run_id`, JSON filename stem, or file path. Human output shows status, score, duration, turns, token, assertion, tool-call, and error deltas; `--json` emits the same comparison data as JSON.
 
 ## Security Checks
 

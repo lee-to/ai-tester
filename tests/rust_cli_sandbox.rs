@@ -1,11 +1,16 @@
 use std::fs;
 use std::path::Path;
 
+use ai_tester::assertions::AssertionResult;
 use ai_tester::sandbox::{create_sandbox, SandboxOptions};
 use ai_tester::scenario::{FixtureFile, Fixtures};
-use ai_tester::trace::{write_trace, TraceRecord};
+use ai_tester::trace::{
+    write_trace, ToolCallRecord, ToolCallSummary, TraceError, TraceRecord, Turn,
+};
 use assert_cmd::Command;
+use chrono::{DateTime, Utc};
 use predicates::prelude::*;
+use serde_json::json;
 use tempfile::TempDir;
 
 #[test]
@@ -154,6 +159,185 @@ fn cli_run_dry_run_loads_standalone_scenario_dir() {
         .stdout(predicate::str::contains("prompt-audit"))
         .stdout(predicate::str::contains("scenarios  1"))
         .stdout(predicate::str::contains("skipped").not());
+}
+
+#[test]
+fn cli_trend_filters_limits_and_emits_json() {
+    let tmp = TempDir::new().expect("temp dir");
+    let old = write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "demo-old",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+    let new = write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "demo-new",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-02T10:00:00Z",
+            pass: false,
+            score: Some(0.5),
+            tool: "Bash",
+        },
+    );
+    let _other = write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "other-skill",
+            skill: "other",
+            scenario: "smoke",
+            finished_at: "2026-05-03T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+    assert!(old.exists());
+    assert!(new.exists());
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    let output = cmd
+        .current_dir(tmp.path())
+        .args(["trend", "demo", "--scenario", "smoke", "--last", "2"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(stdout.contains("ai-tester trend"));
+    assert!(stdout.contains("demo-old"));
+    assert!(stdout.contains("demo-new"));
+    assert!(stdout.find("demo-old") < stdout.find("demo-new"));
+    assert!(!stdout.contains("other-skill"));
+
+    let mut json_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    json_cmd
+        .current_dir(tmp.path())
+        .args(["trend", "demo", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runId\": \"demo-new\""))
+        .stdout(predicate::str::contains("\"weightedScore\": 0.5"));
+}
+
+#[test]
+fn cli_trace_prints_summary_and_raw_json() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "trace-target",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: false,
+            score: Some(0.5),
+            tool: "Bash",
+        },
+    );
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["trace", "trace-target"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ai-tester trace"))
+        .stdout(predicate::str::contains("demo/smoke"))
+        .stdout(predicate::str::contains("Assertions"))
+        .stdout(predicate::str::contains("Tool calls"))
+        .stdout(predicate::str::contains("Turns"))
+        .stdout(predicate::str::contains("final output for trace-target"));
+
+    let mut json_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    json_cmd
+        .current_dir(tmp.path())
+        .args(["trace", "trace-target", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runId\": \"trace-target\""))
+        .stdout(predicate::str::contains("\"schemaVersion\": \"2.0.0\""));
+}
+
+#[test]
+fn cli_compare_prints_deltas_and_json() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "compare-a",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "compare-b",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-02T10:00:00Z",
+            pass: false,
+            score: Some(0.5),
+            tool: "Bash",
+        },
+    );
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["compare", "compare-a", "compare-b"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ai-tester compare"))
+        .stdout(predicate::str::contains("compare-a"))
+        .stdout(predicate::str::contains("compare-b"))
+        .stdout(predicate::str::contains("score"))
+        .stdout(predicate::str::contains("Assertions"))
+        .stdout(predicate::str::contains("Tool calls"))
+        .stdout(predicate::str::contains("errors"));
+
+    let mut json_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    json_cmd
+        .current_dir(tmp.path())
+        .args(["compare", "compare-a", "compare-b", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runA\""))
+        .stdout(predicate::str::contains("\"scoreDelta\": -0.5"))
+        .stdout(predicate::str::contains("\"assertionChanges\""));
+}
+
+#[test]
+fn cli_trace_and_compare_missing_run_return_config_error() {
+    let tmp = TempDir::new().expect("temp dir");
+
+    let mut trace_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    trace_cmd
+        .current_dir(tmp.path())
+        .args(["trace", "missing"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("No runs/ directory found"));
+
+    let mut compare_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    compare_cmd
+        .current_dir(tmp.path())
+        .args(["compare", "missing-a", "missing-b"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("No runs/ directory found"));
 }
 
 #[test]
@@ -510,4 +694,72 @@ fn join_path_prefix(bin_dir: &Path, old_path: &std::ffi::OsStr) -> std::ffi::OsS
     out.push(sep);
     out.push(old_path);
     out
+}
+
+struct TraceSeed<'a> {
+    run_id: &'a str,
+    skill: &'a str,
+    scenario: &'a str,
+    finished_at: &'a str,
+    pass: bool,
+    score: Option<f64>,
+    tool: &'a str,
+}
+
+fn write_named_trace(root: &Path, seed: TraceSeed<'_>) -> std::path::PathBuf {
+    let mut trace = TraceRecord::synthetic(
+        vec![Turn {
+            index: 0,
+            role: "assistant".to_string(),
+            text_deltas: vec![format!("assistant text for {}", seed.run_id)],
+            tool_calls: vec![ToolCallRecord::new(
+                "call-1",
+                seed.tool,
+                json!({"command": "echo ok", "file_path": "README.md"}),
+            )],
+            usage: None,
+        }],
+        format!("final output for {}", seed.run_id),
+        1,
+        None,
+    );
+    trace.run_id = seed.run_id.to_string();
+    trace.skill.name = seed.skill.to_string();
+    trace.scenario.name = seed.scenario.to_string();
+    let finished_at = DateTime::parse_from_rfc3339(seed.finished_at)
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    trace.runner.started_at = finished_at;
+    trace.runner.finished_at = finished_at;
+    trace.runner.duration_ms = if seed.pass { 1_000 } else { 2_500 };
+    trace.runner.turns_used = 1;
+    trace.tool_call_summary = ToolCallSummary::from_turns(&trace.turns, 0);
+    trace.scoring.overall_pass = seed.pass;
+    trace.scoring.all_passed = seed.pass;
+    trace.scoring.weighted_score = seed.score;
+    trace.cost.input_tokens = 10;
+    trace.cost.output_tokens = if seed.pass { 5 } else { 8 };
+    trace.cost.usd_estimate = if seed.pass { 0.001 } else { 0.002 };
+    trace.assertions = vec![AssertionResult {
+        id: "expected-output".to_string(),
+        kind: "output_contains".to_string(),
+        pass: seed.pass,
+        detail: if seed.pass {
+            "final output matched".to_string()
+        } else {
+            "final output did not match pattern".to_string()
+        },
+        weight: 1.0,
+        score: None,
+        min_score: None,
+        rationale: None,
+        captures: Vec::new(),
+    }];
+    if !seed.pass {
+        trace.errors.push(TraceError {
+            kind: "runtime".to_string(),
+            message: format!("runtime error for {}", seed.run_id),
+        });
+    }
+    write_trace(root, &trace).expect("trace written")
 }

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Implemented `ai-tester trend`, `ai-tester trace`, and `ai-tester compare` for v2 traces under `runs/`, including human-readable output and `--json` modes.
+
 ### Changed
 
 - Rewrote `ai-tester` from TypeScript/Node to a native Rust CLI.
