@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 
 use crate::assertions::AssertionResult;
+use crate::commands::trace_files::{load_v2_trace_file, load_v2_traces, LoadedTrace};
 use crate::trace::TraceRecord;
 use crate::ui::{self, Tone};
 
@@ -27,12 +27,6 @@ pub struct CompareOptions {
 pub struct TraceOptions {
     pub run_id: String,
     pub json: bool,
-}
-
-#[derive(Debug, Clone)]
-struct LoadedTrace {
-    path: PathBuf,
-    record: TraceRecord,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,42 +249,10 @@ pub fn trace_command(opts: TraceOptions) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn load_v2_traces() -> anyhow::Result<(bool, Vec<LoadedTrace>)> {
-    let runs_dir = std::env::current_dir()?.join("runs");
-    if !runs_dir.is_dir() {
-        return Ok((false, Vec::new()));
-    }
-
-    let mut traces = Vec::new();
-    for entry in walkdir::WalkDir::new(&runs_dir) {
-        let entry = entry?;
-        let is_json = entry.path().extension().is_some_and(|ext| ext == "json");
-        if !entry.file_type().is_file() || !is_json {
-            continue;
-        }
-        if let Some(trace) = read_v2_trace(entry.path())? {
-            traces.push(trace);
-        }
-    }
-    Ok((true, traces))
-}
-
-fn read_v2_trace(path: &Path) -> anyhow::Result<Option<LoadedTrace>> {
-    let raw = fs::read_to_string(path)?;
-    let record = match serde_json::from_str::<TraceRecord>(&raw) {
-        Ok(record) if record.schema_version == "2.0.0" => record,
-        _ => return Ok(None),
-    };
-    Ok(Some(LoadedTrace {
-        path: path.to_path_buf(),
-        record,
-    }))
-}
-
 fn find_trace(query: &str, traces: &[LoadedTrace]) -> anyhow::Result<TraceLookup> {
     let query_path = Path::new(query);
     if query_path.is_file() {
-        return Ok(match read_v2_trace(query_path)? {
+        return Ok(match load_v2_trace_file(query_path)? {
             Some(trace) => TraceLookup::Found(Box::new(trace)),
             None => {
                 TraceLookup::Missing(format!("Trace path `{query}` is not a readable v2 trace"))

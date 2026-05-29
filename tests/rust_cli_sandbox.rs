@@ -341,6 +341,171 @@ fn cli_trace_and_compare_missing_run_return_config_error() {
 }
 
 #[test]
+fn cli_history_and_trend_skip_invalid_and_non_v2_traces() {
+    let tmp = TempDir::new().expect("temp dir");
+    let runs_dir = tmp.path().join("runs/demo");
+    fs::create_dir_all(&runs_dir).expect("runs dir");
+    fs::write(runs_dir.join("broken.json"), "{not json").expect("invalid json written");
+    fs::write(
+        runs_dir.join("old-schema.json"),
+        "{\"schemaVersion\":\"1.0.0\",\"runId\":\"old-schema\"}\n",
+    )
+    .expect("old trace written");
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "valid-v2",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+
+    let mut history_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    history_cmd
+        .current_dir(tmp.path())
+        .args(["history", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runId\": \"valid-v2\""))
+        .stdout(predicate::str::contains("old-schema").not());
+
+    let mut trend_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    trend_cmd
+        .current_dir(tmp.path())
+        .args(["trend", "demo", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"runId\": \"valid-v2\""))
+        .stdout(predicate::str::contains("old-schema").not());
+}
+
+#[test]
+fn cli_trace_and_compare_accept_trace_file_paths() {
+    let tmp = TempDir::new().expect("temp dir");
+    let trace_a = write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "path-a",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+    let trace_b = write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "path-b",
+            skill: "demo",
+            scenario: "smoke",
+            finished_at: "2026-05-02T10:00:00Z",
+            pass: false,
+            score: Some(0.5),
+            tool: "Bash",
+        },
+    );
+
+    let mut trace_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    trace_cmd
+        .current_dir(tmp.path())
+        .args(["trace", trace_a.to_str().expect("utf8 trace path")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("path-a"));
+
+    let mut compare_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    compare_cmd
+        .current_dir(tmp.path())
+        .args([
+            "compare",
+            trace_a.to_str().expect("utf8 trace path"),
+            trace_b.to_str().expect("utf8 trace path"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("path-a"))
+        .stdout(predicate::str::contains("path-b"));
+}
+
+#[test]
+fn cli_trace_reports_ambiguous_run_id() {
+    let tmp = TempDir::new().expect("temp dir");
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "duplicate-run",
+            skill: "demo-a",
+            scenario: "smoke",
+            finished_at: "2026-05-01T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+    write_named_trace(
+        tmp.path(),
+        TraceSeed {
+            run_id: "duplicate-run",
+            skill: "demo-b",
+            scenario: "smoke",
+            finished_at: "2026-05-02T10:00:00Z",
+            pass: true,
+            score: Some(1.0),
+            tool: "Read",
+        },
+    );
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["trace", "duplicate-run"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("ambiguous trace id"))
+        .stdout(predicate::str::contains("duplicate-run"));
+}
+
+#[test]
+fn cli_trend_last_zero_uses_default_limit() {
+    let tmp = TempDir::new().expect("temp dir");
+    for index in 0..21 {
+        let run_id = format!("series-{index:02}");
+        let finished_at = format!("2026-05-{day:02}T10:00:00Z", day = index + 1);
+        write_named_trace(
+            tmp.path(),
+            TraceSeed {
+                run_id: &run_id,
+                skill: "demo",
+                scenario: "smoke",
+                finished_at: &finished_at,
+                pass: true,
+                score: Some(1.0),
+                tool: "Read",
+            },
+        );
+    }
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    let output = cmd
+        .current_dir(tmp.path())
+        .args(["trend", "demo", "--last", "0"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(!stdout.contains("series-00"));
+    assert!(stdout.contains("series-01"));
+    assert!(stdout.contains("series-20"));
+}
+
+#[test]
 fn cli_history_reads_v2_traces_from_runs_dir() {
     let tmp = TempDir::new().expect("temp dir");
     let trace = TraceRecord::synthetic(Vec::new(), "ok".to_string(), 2, None);
