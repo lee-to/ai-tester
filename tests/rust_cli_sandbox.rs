@@ -157,27 +157,6 @@ fn cli_run_dry_run_loads_standalone_scenario_dir() {
 }
 
 #[test]
-fn cli_placeholder_commands_are_explicit_stubs() {
-    for (command, expected) in [
-        ("trend", "ai-tester trend"),
-        ("compare", "ai-tester compare"),
-        ("trace", "ai-tester trace"),
-    ] {
-        let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
-        let args = match command {
-            "trend" => vec![command, "skill"],
-            "compare" => vec![command, "a", "b"],
-            "trace" => vec![command, "run-id"],
-            _ => unreachable!(),
-        };
-        cmd.args(args)
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(expected));
-    }
-}
-
-#[test]
 fn cli_history_reads_v2_traces_from_runs_dir() {
     let tmp = TempDir::new().expect("temp dir");
     let trace = TraceRecord::synthetic(Vec::new(), "ok".to_string(), 2, None);

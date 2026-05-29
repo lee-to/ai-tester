@@ -90,7 +90,6 @@ pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
 
     println!("{}", ui::header("ai-tester", "history"));
     println!("  {}", ui::kv("showing", shown.len()));
-    println!("  {}", ui::kv("trace", "use `ai-tester trace <run_id>`"));
     println!();
     for entry in &shown {
         let mark = ui::paint(

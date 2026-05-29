@@ -71,7 +71,7 @@ Initial public release.
 
 ### Added
 
-- CLI `ai-tester` with subcommands `run`, `runtimes`, `sandbox-prune`, and stubs for `trend` / `compare` / `trace`.
+- CLI `ai-tester` with subcommands `run`, `runtimes`, and `sandbox-prune`.
 - Project config discovery via `.ai-tester.yaml` — walks up from the current working directory to locate the skills root.
 - Three prompt-source modes per scenario: `skill:`, `system_prompt:` (inline), and `system_prompt_file:` (external file).
 - Declarative YAML scenarios with fixtures, user responses, and assertions.
@@ -87,7 +87,7 @@ Initial public release.
 - Isolated git-worktree sandbox per scenario under `$TMPDIR/ai-tester-<scenario>-<rand>/`, with SIGINT/SIGTERM/SIGHUP cleanup and orphan-pruning via `ai-tester sandbox-prune`.
 - JSON trace output per run under `runs/<skill-or-inline>/<iso>__<semver>__<hash8>.json` including turns, tool calls, assertions, scoring, and cost estimates.
 - Live progress reporter with idle-warning (`--idle-warn`) and `--quiet` mode.
-- Weighted scoring (`scoring.weightedScore`) for future trend analysis.
+- Weighted scoring (`scoring.weightedScore`).
 
 [Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.5.0

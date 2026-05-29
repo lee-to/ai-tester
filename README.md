@@ -128,14 +128,6 @@ ai-tester sandbox-prune --yes --min-age 300
 
 Interactive runs use colorized output when stdout is a terminal. Set `NO_COLOR=1` to disable colors, or `AI_TESTER_FORCE_COLOR=1` to force ANSI colors in captured logs.
 
-Placeholder commands currently kept for CLI shape:
-
-```bash
-ai-tester trend <skill>
-ai-tester compare <run-a> <run-b>
-ai-tester trace <run-id>
-```
-
 Exit codes:
 
 - `0`: all scenarios passed
