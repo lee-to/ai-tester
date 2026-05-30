@@ -694,9 +694,108 @@ fn run_process(
     let status = child.wait()?;
     let stderr = stderr_handle.join().unwrap_or_default();
     if !status.success() {
-        anyhow::bail!("{command} failed: {}", stderr.trim());
+        anyhow::bail!(
+            "{command} failed ({}): {}",
+            exit_label(&status),
+            failure_detail(&stderr, &stdout)
+        );
     }
     Ok(stdout)
+}
+
+fn exit_label(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit {code}"),
+        None => "killed by signal".to_string(),
+    }
+}
+
+/// Build a human-readable failure detail. CLIs like `claude`/`codex` often write
+/// the actual error to stdout (JSON events) and leave stderr empty, so fall back
+/// to stdout when stderr has nothing useful.
+fn failure_detail(stderr: &str, stdout: &str) -> String {
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return truncate_detail(stderr);
+    }
+    if let Some(msg) = error_from_jsonl(stdout) {
+        return truncate_detail(&msg);
+    }
+    let tail = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(5)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if tail.is_empty() {
+        "no output on stdout/stderr".to_string()
+    } else {
+        truncate_detail(&tail)
+    }
+}
+
+/// Scan JSONL/JSON stdout for error-ish string fields and join what we find.
+fn error_from_jsonl(stdout: &str) -> Option<String> {
+    let mut messages = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let is_error = value.get("is_error").and_then(Value::as_bool) == Some(true)
+            || value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|s| s.contains("error"))
+            || value.get("type").and_then(Value::as_str) == Some("error")
+            || value.get("error").is_some();
+        if !is_error {
+            continue;
+        }
+        for key in ["error", "message", "result"] {
+            if let Some(text) = value.get(key).and_then(Value::as_str) {
+                if !text.trim().is_empty() {
+                    messages.push(text.trim().to_string());
+                    break;
+                }
+            }
+            if let Some(text) = value
+                .get(key)
+                .and_then(|v| v.get("message"))
+                .and_then(Value::as_str)
+            {
+                if !text.trim().is_empty() {
+                    messages.push(text.trim().to_string());
+                    break;
+                }
+            }
+        }
+    }
+    if messages.is_empty() {
+        None
+    } else {
+        messages.dedup();
+        Some(messages.join(" | "))
+    }
+}
+
+fn truncate_detail(detail: &str) -> String {
+    const MAX: usize = 600;
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.chars().count() <= MAX {
+        normalized
+    } else {
+        let head = normalized.chars().take(MAX).collect::<String>();
+        format!("{head}…")
+    }
 }
 
 fn read_stdout_buffered(stdout: impl Read) -> anyhow::Result<String> {
@@ -1381,6 +1480,39 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::scenario::Runner;
+
+    #[test]
+    fn failure_detail_prefers_stderr() {
+        let detail = failure_detail("  boom on stderr  ", "ignored stdout");
+        assert_eq!(detail, "boom on stderr");
+    }
+
+    #[test]
+    fn failure_detail_extracts_claude_result_error() {
+        let stdout = r#"{"type":"system","subtype":"init"}
+{"type":"result","subtype":"error_during_execution","is_error":true,"result":"model gpt-5.4 not found"}"#;
+        let detail = failure_detail("", stdout);
+        assert_eq!(detail, "model gpt-5.4 not found");
+    }
+
+    #[test]
+    fn failure_detail_extracts_codex_turn_error() {
+        let stdout = r#"{"type":"turn.started"}
+{"type":"turn.failed","error":{"message":"usage limit reached"}}"#;
+        let detail = failure_detail("", stdout);
+        assert_eq!(detail, "usage limit reached");
+    }
+
+    #[test]
+    fn failure_detail_falls_back_to_stdout_tail() {
+        let detail = failure_detail("", "first\nplain text error\n");
+        assert_eq!(detail, "first | plain text error");
+    }
+
+    #[test]
+    fn failure_detail_handles_empty_output() {
+        assert_eq!(failure_detail("", ""), "no output on stdout/stderr");
+    }
 
     #[test]
     fn claude_args_put_skill_in_system_prompt_and_scope_tools() {

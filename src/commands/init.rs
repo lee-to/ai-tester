@@ -27,7 +27,7 @@ pub fn init_command(opts: InitOptions) -> anyhow::Result<i32> {
         bail!(".ai-tester.yaml already exists; pass --force to overwrite");
     }
     let content = format!(
-        "skills_dir: {}\ndefaults:\n  model: {}\n  permission_mode: {}\n",
+        "skills_dir: {}\n# runs_dir: runs   # where recorded run traces are stored (default: ./runs)\ndefaults:\n  model: {}\n  permission_mode: {}\n",
         opts.skills_dir, opts.model, opts.permission_mode
     );
     fs::write(path, content)?;

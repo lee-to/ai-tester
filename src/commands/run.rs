@@ -85,6 +85,7 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
 }
 
 fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
+    let runs_dir = load_project_config(std::env::current_dir()?)?.runs_dir;
     let scenarios = discover_scenarios(&opts)?;
     if scenarios.is_empty() {
         println!("{}", ui::header("ai-tester", "behavioral run"));
@@ -215,7 +216,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             record.scoring.weighted_score = Some(weighted);
         }
 
-        let trace_path = write_trace(std::env::current_dir()?, &record)?;
+        let trace_path = write_trace(&runs_dir, &record)?;
         print_scenario_result(&record, &trace_path, !opts.quiet);
         sandbox.cleanup()?;
         println!();
@@ -750,6 +751,7 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
             token_budget: scenario.token_budget,
         },
         runner: TraceRunner {
+            runtime: scenario.runner.runtime.clone(),
             model: scenario.runner.model.clone(),
             permission_mode: scenario.runner.permission_mode.clone(),
             started_at,

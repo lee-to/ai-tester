@@ -12,6 +12,7 @@ pub struct ProjectConfig {
     pub root_dir: PathBuf,
     pub config_path: Option<PathBuf>,
     pub skills_dir: PathBuf,
+    pub runs_dir: PathBuf,
     pub defaults: ProjectDefaults,
 }
 
@@ -25,6 +26,7 @@ pub struct ProjectDefaults {
 #[derive(Debug, Deserialize, Default)]
 struct RawProjectConfig {
     skills_dir: Option<String>,
+    runs_dir: Option<String>,
     defaults: Option<RawProjectDefaults>,
 }
 
@@ -63,10 +65,16 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             .as_deref()
             .map(|p| root_dir.join(p))
             .unwrap_or_else(|| root_dir.join("skills"));
+        let runs_dir = raw
+            .runs_dir
+            .as_deref()
+            .map(|p| root_dir.join(p))
+            .unwrap_or_else(|| root_dir.join("runs"));
         Ok(ProjectConfig {
             root_dir,
             config_path: Some(config_path),
             skills_dir,
+            runs_dir,
             defaults: ProjectDefaults {
                 runtime: raw.defaults.as_ref().and_then(|d| d.runtime.clone()),
                 model: raw.defaults.as_ref().and_then(|d| d.model.clone()),
@@ -78,9 +86,15 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             root_dir: start.clone(),
             config_path: None,
             skills_dir: start.join("skills"),
+            runs_dir: start.join("runs"),
             defaults: ProjectDefaults::default(),
         })
     }
+}
+
+/// Resolve the runs directory for the project rooted at the current working dir.
+pub fn resolve_runs_dir() -> anyhow::Result<PathBuf> {
+    Ok(load_project_config(std::env::current_dir()?)?.runs_dir)
 }
 
 fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {

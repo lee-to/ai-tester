@@ -36,6 +36,8 @@ struct RunSummary {
     file_path: String,
     skill: String,
     scenario: String,
+    runtime: String,
+    model: String,
     finished_at: String,
     overall_pass: bool,
     weighted_score: Option<f64>,
@@ -189,6 +191,16 @@ pub fn trend_command(opts: TrendOptions) -> anyhow::Result<i32> {
                 format!("{}/{}", record.skill.name, record.scenario.name)
             )
         );
+        println!(
+            "    {}",
+            ui::kv(
+                "engine",
+                crate::commands::history::runtime_model_label(
+                    &record.runner.runtime,
+                    &record.runner.model
+                )
+            )
+        );
     }
     Ok(0)
 }
@@ -290,6 +302,8 @@ fn summary_for(trace: &LoadedTrace) -> RunSummary {
         file_path: trace.path.display().to_string(),
         skill: record.skill.name.clone(),
         scenario: record.scenario.name.clone(),
+        runtime: record.runner.runtime.clone(),
+        model: record.runner.model.clone(),
         finished_at: record.runner.finished_at.to_rfc3339(),
         overall_pass: record.scoring.overall_pass,
         weighted_score: record.scoring.weighted_score,
@@ -451,10 +465,20 @@ fn print_trace(trace: &LoadedTrace) {
     println!(
         "  {}",
         ui::kv(
+            "engine",
+            crate::commands::history::runtime_model_label(
+                &record.runner.runtime,
+                &record.runner.model
+            )
+        )
+    );
+    println!(
+        "  {}",
+        ui::kv(
             "runner",
             format!(
-                "{} {} {}",
-                record.runner.model, record.runner.permission_mode, record.runner.max_turns
+                "{} {}",
+                record.runner.permission_mode, record.runner.max_turns
             )
         )
     );
@@ -565,6 +589,23 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
                 "{} -> {}",
                 val_a(status_word(run_a.record.scoring.overall_pass)),
                 val_b(status_word(run_b.record.scoring.overall_pass))
+            )
+        )
+    );
+    println!(
+        "    {}",
+        ui::kv(
+            "engine",
+            format!(
+                "{} -> {}",
+                val_a(crate::commands::history::runtime_model_label(
+                    &run_a.record.runner.runtime,
+                    &run_a.record.runner.model
+                )),
+                val_b(crate::commands::history::runtime_model_label(
+                    &run_b.record.runner.runtime,
+                    &run_b.record.runner.model
+                ))
             )
         )
     );

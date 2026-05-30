@@ -18,6 +18,8 @@ struct HistoryEntry {
     file_path: String,
     skill: String,
     scenario: String,
+    runtime: String,
+    model: String,
     finished_at: String,
     overall_pass: bool,
     duration_ms: u64,
@@ -102,8 +104,19 @@ pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
             ui::paint(&format!("~${:.4}", entry.usd_estimate), Tone::Muted)
         );
         println!("    {}", ui::kv("run_id", &entry.run_id));
+        println!(
+            "    {}",
+            ui::kv("engine", runtime_model_label(&entry.runtime, &entry.model))
+        );
     }
     Ok(0)
+}
+
+/// Render "<runtime> · <model>", tolerating traces predating the runtime field.
+pub(crate) fn runtime_model_label(runtime: &str, model: &str) -> String {
+    let runtime = if runtime.is_empty() { "?" } else { runtime };
+    let model = if model.is_empty() { "?" } else { model };
+    format!("{runtime} · {model}")
 }
 
 fn to_entry(trace: LoadedTrace) -> HistoryEntry {
@@ -115,6 +128,8 @@ fn to_entry(trace: LoadedTrace) -> HistoryEntry {
         file_path: trace.path.display().to_string(),
         skill: record.skill.name,
         scenario: record.scenario.name,
+        runtime: record.runner.runtime,
+        model: record.runner.model,
         finished_at: record
             .runner
             .finished_at

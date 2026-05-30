@@ -511,7 +511,7 @@ fn cli_trend_last_zero_uses_default_limit() {
 fn cli_history_reads_v2_traces_from_runs_dir() {
     let tmp = TempDir::new().expect("temp dir");
     let trace = TraceRecord::synthetic(Vec::new(), "ok".to_string(), 2, None);
-    let path = write_trace(tmp.path(), &trace).expect("trace written");
+    let path = write_trace(tmp.path().join("runs"), &trace).expect("trace written");
     assert!(path.exists());
 
     let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
@@ -928,5 +928,5 @@ fn write_named_trace(root: &Path, seed: TraceSeed<'_>) -> std::path::PathBuf {
             message: format!("runtime error for {}", seed.run_id),
         });
     }
-    write_trace(root, &trace).expect("trace written")
+    write_trace(root.join("runs"), &trace).expect("trace written")
 }

@@ -125,6 +125,7 @@ impl TraceRecord {
                 token_budget,
             },
             runner: TraceRunner {
+                runtime: "claude".to_string(),
                 model: crate::config::DEFAULT_MODEL.to_string(),
                 permission_mode: "bypassPermissions".to_string(),
                 started_at: Utc::now(),
@@ -187,6 +188,8 @@ pub struct TraceScenario {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceRunner {
+    #[serde(default)]
+    pub runtime: String,
     pub model: String,
     pub permission_mode: String,
     pub started_at: DateTime<Utc>,
@@ -257,10 +260,9 @@ pub struct TraceError {
     pub message: String,
 }
 
-pub fn write_trace(root: impl AsRef<Path>, record: &TraceRecord) -> anyhow::Result<PathBuf> {
-    let runs_dir = root
+pub fn write_trace(runs_dir: impl AsRef<Path>, record: &TraceRecord) -> anyhow::Result<PathBuf> {
+    let runs_dir = runs_dir
         .as_ref()
-        .join("runs")
         .join(sanitize_path_segment(&record.skill.name));
     fs::create_dir_all(&runs_dir)?;
     let path = runs_dir.join(format!("{}.json", sanitize_path_segment(&record.run_id)));

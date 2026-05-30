@@ -10,7 +10,7 @@ pub(crate) struct LoadedTrace {
 }
 
 pub(crate) fn load_v2_traces() -> anyhow::Result<(bool, Vec<LoadedTrace>)> {
-    let runs_dir = std::env::current_dir()?.join("runs");
+    let runs_dir = crate::config::resolve_runs_dir()?;
     if !runs_dir.is_dir() {
         return Ok((false, Vec::new()));
     }
