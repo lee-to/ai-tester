@@ -25,6 +25,7 @@ LLM tests that mock the model are easy to write and weak at catching production 
 - **Fixtures.** Inline files, `content_from`, directory trees, staged changes, committed baselines, and setup commands.
 - **Trace output.** Every live run writes a schema `2.0.0` JSON trace under `runs/`.
 - **History view.** `ai-tester history` summarizes prior v2 traces.
+- **Self-update.** `ai-tester update` pulls the latest GitHub release for your platform.
 - **Security checks.** Assertions can forbid web tools, shell networking, path escapes, destructive shell commands, or unexpected tool families.
 
 ## Installation
@@ -40,6 +41,12 @@ git clone https://github.com/lee-to/ai-tester.git
 cd ai-tester
 cargo build --release
 ./target/release/ai-tester --help
+```
+
+Once installed, upgrade in place with the built-in updater:
+
+```bash
+ai-tester update
 ```
 
 Requires Rust **1.82 or newer** when building from source.
@@ -130,7 +137,45 @@ ai-tester compare <run-a> <run-b> --json
 ai-tester runtimes
 ai-tester sandbox-prune
 ai-tester sandbox-prune --yes --min-age 300
+
+# Self-update from the latest GitHub release
+ai-tester update
+ai-tester update --check
+ai-tester update --force
+ai-tester update --tag v1.1.0
 ```
+
+### `sandbox-prune`
+
+Removes orphan `ai-tester-*` sandbox directories left behind in the system temp
+directory by crashed runs or `--keep-sandbox`. Runs as a **dry run by default** —
+it lists what would be deleted; pass `--yes` to actually remove them. Use
+`--min-age <seconds>` (default `60`) to only prune sandboxes older than the given
+age, so active runs are never touched.
+
+```bash
+ai-tester sandbox-prune              # dry run: list orphans
+ai-tester sandbox-prune --yes        # delete orphans older than 60s
+ai-tester sandbox-prune --yes --min-age 300
+```
+
+### `update`
+
+Updates the running `ai-tester` binary to the latest GitHub release for the
+current platform. It detects your target triple, downloads the matching release
+asset, verifies it against `SHA256SUMS.txt` when present, and replaces the binary
+in place (`ai-tester --version` reports the build it resolved). Requires `curl`
+and `tar`/`unzip` on `PATH`.
+
+```bash
+ai-tester update           # install the latest release if newer
+ai-tester update --check   # report whether an update is available, install nothing
+ai-tester update --force   # reinstall even if already current
+ai-tester update --tag v1.1.0   # pin a specific release tag
+```
+
+If the binary lives in a directory you can't write to (e.g. a system path), run
+the command with elevated permissions (`sudo`).
 
 Interactive runs use colorized output when stdout is a terminal. Set `NO_COLOR=1` to disable colors, or `AI_TESTER_FORCE_COLOR=1` to force ANSI colors in captured logs.
 

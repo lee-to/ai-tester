@@ -91,6 +91,18 @@ enum Commands {
         #[arg(long, default_value_t = 60)]
         min_age: u64,
     },
+    #[command(about = "Update ai-tester to the latest GitHub release for this platform")]
+    Update {
+        /// Only report whether an update is available
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even if already on the latest version
+        #[arg(long)]
+        force: bool,
+        /// Install a specific tag instead of the latest release
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 pub fn main_entry() -> anyhow::Result<()> {
@@ -188,6 +200,13 @@ pub fn main_entry() -> anyhow::Result<()> {
         }
         Commands::SandboxPrune { yes, min_age } => {
             crate::commands::sandbox_prune::sandbox_prune_command(yes, min_age)?
+        }
+        Commands::Update { check, force, tag } => {
+            crate::commands::update::update_command(crate::commands::update::UpdateOptions {
+                check,
+                force,
+                tag,
+            })?
         }
     };
     if code != 0 {
