@@ -82,10 +82,12 @@ enum Commands {
         json: bool,
     },
     Runtimes,
-    #[command(about = "Not implemented yet: planned orphan sandbox cleanup")]
+    #[command(about = "Remove orphan ai-tester sandbox dirs left in the temp directory")]
     SandboxPrune {
+        /// Actually delete (without this it's a dry run)
         #[arg(long)]
         yes: bool,
+        /// Only prune sandboxes older than this many seconds
         #[arg(long, default_value_t = 60)]
         min_age: u64,
     },
