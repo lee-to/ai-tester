@@ -122,6 +122,10 @@ ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
 ai-tester run --dir ./prompts --runtime codex
 
+# Choose output format (default: live events + summary)
+ai-tester run <skill> --format json
+ai-tester run <skill> --format markdown
+
 # Inspect history
 ai-tester history
 ai-tester history <skill> --scenario <scenario-id> --last 10
@@ -143,6 +147,27 @@ ai-tester update
 ai-tester update --check
 ai-tester update --force
 ai-tester update --tag v1.1.0
+```
+
+### `run --format`
+
+By default `run` streams live runtime events followed by a colored summary
+(`--format live`). For CI or scripted pipelines, choose a machine-readable
+format instead:
+
+- `--format json` — suppresses live events and prints a single JSON document
+  with a `summary` object (`total`, `passed`, `failed`, `errors`, `overallPass`)
+  and a `runs` array of full trace records.
+- `--format markdown` — prints a Markdown report: a summary line, a results
+  table (scenario, skill, runtime, result, score, turns, duration), and a
+  detail section per scenario that has failed assertions or errors.
+
+Traces are still written to the `runs/` directory and exit codes are unchanged
+(`0` pass, `1` assertion failures, `2` runtime errors) in every format.
+
+```bash
+ai-tester run <skill> --format json > report.json
+ai-tester run <skill> --format markdown > report.md
 ```
 
 ### `sandbox-prune`

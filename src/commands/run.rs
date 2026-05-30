@@ -13,6 +13,18 @@ use crate::trace::{
 };
 use crate::ui::{self, Tone};
 
+/// How `ai-tester run` emits its results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Stream live events and human-readable summary (default).
+    #[default]
+    Live,
+    /// Emit a single JSON document with all trace records.
+    Json,
+    /// Emit a Markdown report.
+    Markdown,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RunOptions {
     pub skill: Option<String>,
@@ -26,6 +38,7 @@ pub struct RunOptions {
     pub keep_sandbox: bool,
     pub quiet: bool,
     pub idle_warn_seconds: u64,
+    pub format: OutputFormat,
 }
 
 pub fn run_command(opts: RunOptions) -> anyhow::Result<i32> {
@@ -85,15 +98,25 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
 }
 
 fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
+    // Non-live formats suppress banners, live progress and per-scenario output;
+    // results are buffered and rendered once at the end.
+    let silent = opts.format != OutputFormat::Live;
+    let verbose = !opts.quiet && !silent;
     let runs_dir = load_project_config(std::env::current_dir()?)?.runs_dir;
     let scenarios = discover_scenarios(&opts)?;
     if scenarios.is_empty() {
-        println!("{}", ui::header("ai-tester", "behavioral run"));
-        println!(
-            "  {} {}",
-            ui::paint("●", Tone::Warning),
-            ui::paint("No scenarios matched", Tone::Muted)
-        );
+        match opts.format {
+            OutputFormat::Json => println!("{}", render_json(&[])?),
+            OutputFormat::Markdown => println!("{}", render_markdown(&[])),
+            OutputFormat::Live => {
+                println!("{}", ui::header("ai-tester", "behavioral run"));
+                println!(
+                    "  {} {}",
+                    ui::paint("●", Tone::Warning),
+                    ui::paint("No scenarios matched", Tone::Muted)
+                );
+            }
+        }
         return Ok(0);
     }
     let total = scenarios.len();
@@ -101,8 +124,11 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     let mut passed = 0usize;
     let mut failed = 0usize;
     let mut runtime_errors = 0usize;
+    let mut records: Vec<TraceRecord> = Vec::new();
 
-    print_run_banner(total, &opts);
+    if !silent {
+        print_run_banner(total, &opts);
+    }
 
     for (idx, loaded) in scenarios.into_iter().enumerate() {
         let scenario = prepare_scenario(&loaded, &opts)?;
@@ -115,22 +141,26 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
         if !crate::runtime::runtime_ready(&runtime_name) {
-            println!(
-                "{} {}",
-                ui::paint(&format!("[{}/{}]", idx + 1, total), Tone::Accent),
-                ui::paint(&scenario.scenario, Tone::Strong)
-            );
-            println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
-            println!(
-                "  {} `{runtime_name}` runtime is not ready",
-                ui::label("reason")
-            );
-            println!();
+            if !silent {
+                println!(
+                    "{} {}",
+                    ui::paint(&format!("[{}/{}]", idx + 1, total), Tone::Accent),
+                    ui::paint(&scenario.scenario, Tone::Strong)
+                );
+                println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
+                println!(
+                    "  {} `{runtime_name}` runtime is not ready",
+                    ui::label("reason")
+                );
+                println!();
+            }
             runtime_errors += 1;
             continue;
         }
 
-        print_scenario_start(idx + 1, total, &loaded, &scenario, &skill);
+        if !silent {
+            print_scenario_start(idx + 1, total, &loaded, &scenario, &skill);
+        }
 
         let started_at = Utc::now();
         let start = Instant::now();
@@ -145,7 +175,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 }),
             },
         )?;
-        if !opts.quiet {
+        if verbose {
             println!(
                 "  {}{}",
                 ui::label("sandbox"),
@@ -179,12 +209,14 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .skill_install_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            progress: !opts.quiet,
+            progress: verbose,
         }) {
             Ok(result) => result,
             Err(err) => {
-                println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
-                println!("  {}{err}", ui::label("reason"));
+                if !silent {
+                    println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
+                    println!("  {}{err}", ui::label("reason"));
+                }
                 let _ = sandbox.cleanup();
                 runtime_errors += 1;
                 continue;
@@ -217,9 +249,11 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         }
 
         let trace_path = write_trace(&runs_dir, &record)?;
-        print_scenario_result(&record, &trace_path, !opts.quiet);
+        if !silent {
+            print_scenario_result(&record, &trace_path, verbose);
+            println!();
+        }
         sandbox.cleanup()?;
-        println!();
 
         if record.errors.is_empty() && record.scoring.overall_pass {
             passed += 1;
@@ -228,32 +262,143 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         } else {
             runtime_errors += 1;
         }
+        records.push(record);
     }
 
-    print_run_summary(passed, failed, runtime_errors);
+    match opts.format {
+        OutputFormat::Json => println!("{}", render_json(&records)?),
+        OutputFormat::Markdown => println!("{}", render_markdown(&records)),
+        OutputFormat::Live => {
+            print_run_summary(passed, failed, runtime_errors);
+            if failed == 0 && runtime_errors == 0 {
+                println!(
+                    "{} {}",
+                    ui::paint("●", Tone::Success),
+                    ui::status("PASS", true)
+                );
+            } else {
+                println!(
+                    "{} {}",
+                    ui::paint("●", Tone::Error),
+                    ui::status("FAIL", false)
+                );
+            }
+        }
+    }
 
     if failed == 0 && runtime_errors == 0 {
-        println!(
-            "{} {}",
-            ui::paint("●", Tone::Success),
-            ui::status("PASS", true)
-        );
         Ok(0)
     } else if runtime_errors == 0 {
-        println!(
-            "{} {}",
-            ui::paint("●", Tone::Error),
-            ui::status("FAIL", false)
-        );
         Ok(1)
     } else {
-        println!(
-            "{} {}",
-            ui::paint("●", Tone::Error),
-            ui::status("FAIL", false)
-        );
         Ok(2)
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunSummary {
+    total: usize,
+    passed: usize,
+    failed: usize,
+    errors: usize,
+    overall_pass: bool,
+}
+
+impl RunSummary {
+    fn from_records(records: &[TraceRecord]) -> Self {
+        let mut passed = 0;
+        let mut failed = 0;
+        let mut errors = 0;
+        for record in records {
+            if !record.errors.is_empty() {
+                errors += 1;
+            } else if record.scoring.overall_pass {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+        }
+        RunSummary {
+            total: records.len(),
+            passed,
+            failed,
+            errors,
+            overall_pass: failed == 0 && errors == 0,
+        }
+    }
+}
+
+fn render_json(records: &[TraceRecord]) -> anyhow::Result<String> {
+    let doc = serde_json::json!({
+        "summary": RunSummary::from_records(records),
+        "runs": records,
+    });
+    Ok(serde_json::to_string_pretty(&doc)?)
+}
+
+fn render_markdown(records: &[TraceRecord]) -> String {
+    let summary = RunSummary::from_records(records);
+    let mut out = String::new();
+    out.push_str("# ai-tester run\n\n");
+    out.push_str(&format!(
+        "**{}** · {} passed · {} failed · {} errors\n\n",
+        if summary.overall_pass { "PASS" } else { "FAIL" },
+        summary.passed,
+        summary.failed,
+        summary.errors,
+    ));
+
+    if records.is_empty() {
+        out.push_str("_No scenarios matched._\n");
+        return out;
+    }
+
+    out.push_str("| Scenario | Skill | Runtime | Result | Score | Turns | Duration |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    for record in records {
+        let result = if !record.errors.is_empty() {
+            "ERROR"
+        } else if record.scoring.overall_pass {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        let score = record
+            .scoring
+            .weighted_score
+            .map(|s| format!("{:.0}%", s * 100.0))
+            .unwrap_or_else(|| "—".to_string());
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} | {}/{} | {} |\n",
+            record.scenario.name,
+            record.skill.name,
+            record.runner.runtime,
+            result,
+            score,
+            record.runner.turns_used,
+            record.runner.max_turns,
+            format_duration(record.runner.duration_ms),
+        ));
+    }
+    out.push('\n');
+
+    for record in records {
+        let has_failed = record.assertions.iter().any(|a| !a.pass);
+        if !has_failed && record.errors.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("## {}\n\n", record.scenario.name));
+        for assertion in record.assertions.iter().filter(|a| !a.pass) {
+            out.push_str(&format!("- ❌ **{}**: {}\n", assertion.id, assertion.detail));
+        }
+        for error in &record.errors {
+            out.push_str(&format!("- ⚠️ **{}**: {}\n", error.kind, error.message));
+        }
+        out.push('\n');
+    }
+
+    out
 }
 
 fn discover_scenarios(opts: &RunOptions) -> anyhow::Result<Vec<LoadedScenario>> {
@@ -910,5 +1055,100 @@ fn format_score(score: f64) -> String {
         ui::paint(&value, Tone::Warning)
     } else {
         ui::paint(&value, Tone::Error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::trace::{TraceError, TraceRecord};
+
+    fn passing_record(name: &str) -> TraceRecord {
+        let mut record = TraceRecord::synthetic(Vec::new(), "ok".to_string(), 1, None);
+        record.scenario.name = name.to_string();
+        record
+    }
+
+    fn failing_record(name: &str) -> TraceRecord {
+        let mut record = passing_record(name);
+        record.scoring.overall_pass = false;
+        record.scoring.all_passed = false;
+        record.assertions.push(AssertionResult {
+            id: "output_contains".to_string(),
+            kind: "output_contains".to_string(),
+            pass: false,
+            detail: "missing expected text".to_string(),
+            weight: 1.0,
+            score: None,
+            min_score: None,
+            rationale: None,
+            captures: Vec::new(),
+        });
+        record
+    }
+
+    fn errored_record(name: &str) -> TraceRecord {
+        let mut record = passing_record(name);
+        record.errors.push(TraceError {
+            kind: "runtime".to_string(),
+            message: "boom".to_string(),
+        });
+        record
+    }
+
+    #[test]
+    fn summary_counts_pass_fail_error_buckets() {
+        let records = vec![
+            passing_record("a"),
+            failing_record("b"),
+            errored_record("c"),
+        ];
+        let summary = RunSummary::from_records(&records);
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.passed, 1);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.errors, 1);
+        assert!(!summary.overall_pass);
+    }
+
+    #[test]
+    fn json_wraps_summary_and_runs() {
+        let records = vec![passing_record("a")];
+        let value: serde_json::Value =
+            serde_json::from_str(&render_json(&records).unwrap()).unwrap();
+        assert_eq!(value["summary"]["total"], 1);
+        assert_eq!(value["summary"]["passed"], 1);
+        assert_eq!(value["summary"]["overallPass"], true);
+        assert_eq!(value["runs"].as_array().unwrap().len(), 1);
+        assert_eq!(value["runs"][0]["scenario"]["name"], "a");
+    }
+
+    #[test]
+    fn json_handles_empty_records() {
+        let value: serde_json::Value = serde_json::from_str(&render_json(&[]).unwrap()).unwrap();
+        assert_eq!(value["summary"]["total"], 0);
+        assert_eq!(value["summary"]["overallPass"], true);
+        assert!(value["runs"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn markdown_reports_table_and_failure_detail() {
+        let records = vec![passing_record("alpha"), failing_record("beta")];
+        let md = render_markdown(&records);
+        assert!(md.contains("**FAIL**"));
+        assert!(md.contains("| Scenario | Skill |"));
+        assert!(md.contains("| alpha |"));
+        assert!(md.contains("| beta |"));
+        // Only the failing scenario gets a detail section.
+        assert!(md.contains("## beta"));
+        assert!(!md.contains("## alpha"));
+        assert!(md.contains("missing expected text"));
+    }
+
+    #[test]
+    fn markdown_handles_empty_records() {
+        let md = render_markdown(&[]);
+        assert!(md.contains("**PASS**"));
+        assert!(md.contains("_No scenarios matched._"));
     }
 }

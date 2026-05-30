@@ -48,6 +48,9 @@ enum Commands {
         quiet: bool,
         #[arg(long, default_value_t = 30)]
         idle_warn: u64,
+        /// Output format: live (default), json, or markdown
+        #[arg(long, value_enum, default_value_t)]
+        format: crate::commands::run::OutputFormat,
     },
     History {
         skill: Option<String>,
@@ -131,6 +134,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             keep_sandbox,
             quiet,
             idle_warn,
+            format,
         } => run_command(RunOptions {
             skill,
             scenario,
@@ -143,6 +147,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             keep_sandbox,
             quiet,
             idle_warn_seconds: idle_warn,
+            format,
         })?,
         Commands::History {
             skill,
