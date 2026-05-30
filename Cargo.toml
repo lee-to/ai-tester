@@ -11,6 +11,7 @@ name = "ai-tester"
 path = "src/main.rs"
 
 [dependencies]
+agent-client-protocol = "0.12.1"
 anyhow = "1.0"
 camino = { version = "1.2", features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }

@@ -573,6 +573,172 @@ fn cli_run_with_fake_codex_writes_trace_and_evaluates_assertions() {
 }
 
 #[test]
+fn cli_run_with_fake_acp_writes_trace_and_evaluates_assertions() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp(&bin_dir, false);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: ran-command\n    type: tool_called\n    tool: execute\n    args_match:\n      command: \"cargo test\"\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--runtime",
+            "acp",
+            "--agent",
+            "local",
+            "--quiet",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_fake-acp"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    assert_eq!(trace["finalOutput"], "done");
+    assert_eq!(trace["toolCallSummary"]["byTool"]["execute"], 1);
+    assert_eq!(
+        trace["turns"][0]["toolCalls"][0]["input"]["_acpTitle"],
+        "Run tests"
+    );
+}
+
+#[test]
+fn cli_run_with_fake_acp_permission_request_does_not_hang() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp(&bin_dir, true);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-permission\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\n  permission_mode: plan\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+}
+
+#[test]
+fn cli_run_with_fake_acp_stops_before_prompt_past_max_turns() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp(&bin_dir, false);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-max-turns\nsystem_prompt: You are helpful.\nmax_turns: 1\nuser_prompts:\n  - first\n  - second\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("FAIL"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_fake-acp-max-turns"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    assert_eq!(trace["finalOutput"], "done");
+    assert_eq!(trace["runner"]["turnsUsed"], 1);
+    assert_eq!(trace["runner"]["hitMaxTurns"], true);
+}
+
+#[test]
+fn cli_run_acp_requires_configured_agent() {
+    let tmp = TempDir::new().expect("temp dir");
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: missing-acp-agent\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("runner.agent"));
+}
+
+#[test]
+fn cli_runtimes_lists_configured_acp_agents() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp(&bin_dir, false);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp\n    args: []\n",
+    )
+    .expect("config written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["runtimes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("acp:local"))
+        .stdout(predicate::str::contains("ready"));
+}
+
+#[test]
 fn cli_run_with_fake_codex_prints_live_progress() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -849,6 +1015,184 @@ echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\
 echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}'\n",
         )
         .expect("fake claude written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp(bin_dir: &Path, request_permission: bool) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp.cmd");
+        let ps1_path = bin_dir.join("fake-acp.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp.ps1\"\r\n",
+        )
+        .expect("fake acp wrapper written");
+        let permission_script = if request_permission {
+            r#"
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = "perm-1"
+            method = "session/request_permission"
+            params = @{
+                sessionId = "s1"
+                toolCall = @{
+                    toolCallId = "tool-1"
+                    title = "Run tests"
+                    kind = "execute"
+                    rawInput = @{ command = "cargo test" }
+                }
+                options = @(
+                    @{ optionId = "allow"; name = "Allow"; kind = "allow_once" },
+                    @{ optionId = "reject"; name = "Reject"; kind = "reject_once" }
+                )
+            }
+        }
+        [Console]::In.ReadLine() | Out-Null
+"#
+        } else {
+            ""
+        };
+        fs::write(
+            ps1_path,
+            format!(
+                r#"
+function Write-Json($value) {{
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}}
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {{
+    if ([string]::IsNullOrWhiteSpace($line)) {{
+        continue
+    }}
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {{
+        Write-Json @{{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{{
+                protocolVersion = 1
+                agentCapabilities = @{{}}
+                authMethods = @()
+                agentInfo = @{{ name = "fake-acp"; version = "1.0.0" }}
+            }}
+        }}
+    }} elseif ($message.method -eq "session/new") {{
+        Write-Json @{{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{{
+                sessionId = "s1"
+                configOptions = @()
+            }}
+        }}
+    }} elseif ($message.method -eq "session/prompt") {{
+{permission_script}
+        Write-Json @{{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{{
+                sessionId = "s1"
+                update = @{{
+                    sessionUpdate = "tool_call"
+                    toolCallId = "tool-1"
+                    title = "Run tests"
+                    kind = "execute"
+                    status = "in_progress"
+                    rawInput = @{{ command = "cargo test" }}
+                }}
+            }}
+        }}
+        Write-Json @{{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{{
+                sessionId = "s1"
+                update = @{{
+                    sessionUpdate = "tool_call_update"
+                    toolCallId = "tool-1"
+                    status = "completed"
+                    rawOutput = @{{ stdout = "clean" }}
+                    content = @(@{{ type = "content"; content = @{{ type = "text"; text = "clean" }} }})
+                }}
+            }}
+        }}
+        Write-Json @{{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{{
+                sessionId = "s1"
+                update = @{{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{{ type = "text"; text = "done" }}
+                }}
+            }}
+        }}
+        Write-Json @{{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{{ stopReason = "end_turn" }}
+        }}
+    }} elseif ($message.method -eq "session/close") {{
+        Write-Json @{{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{{}}
+        }}
+        exit 0
+    }}
+}}
+"#
+            ),
+        )
+        .expect("fake acp script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp");
+        let permission_script = if request_permission {
+            r#"
+    echo '{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"tool-1","title":"Run tests","kind":"execute","rawInput":{"command":"cargo test"}},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}'
+    read -r ignored
+"#
+        } else {
+            ""
+        };
+        fs::write(
+            &path,
+            format!(
+                r#"#!/bin/sh
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1,\"agentCapabilities\":{{}},\"authMethods\":[],\"agentInfo\":{{\"name\":\"fake-acp\",\"version\":\"1.0.0\"}}}}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"s1\",\"configOptions\":[]}}}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+{permission_script}
+      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Run tests","kind":"execute","status":"in_progress","rawInput":{{"command":"cargo test"}}}}}}}}'
+      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"completed","rawOutput":{{"stdout":"clean"}},"content":[{{"type":"content","content":{{"type":"text","text":"clean"}}}}]}}}}}}'
+      echo '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"done"}}}}}}}}'
+      echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{}}}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+            ),
+        )
+        .expect("fake acp written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");

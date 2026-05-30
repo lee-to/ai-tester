@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Implemented `ai-tester trend`, `ai-tester trace`, and `ai-tester compare` for v2 traces under `runs/`, including human-readable output and `--json` modes.
+- Generic `runtime: acp` support for configured Agent Client Protocol agents, including `acp_agents` project config, `runner.agent`, `ai-tester run --agent`, ACP tool-call normalization, and automatic permission-request responses.
 
 ### Changed
 
