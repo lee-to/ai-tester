@@ -540,8 +540,8 @@ fn print_trace(trace: &LoadedTrace) {
 
 fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutput) {
     println!("{}", ui::header("ai-tester", "compare"));
-    println!("  {}", ui::kv("run A", &run_a.record.run_id));
-    println!("  {}", ui::kv("run B", &run_b.record.run_id));
+    println!("  {}", ui::kv("run A", val_a(&run_a.record.run_id)));
+    println!("  {}", ui::kv("run B", val_b(&run_b.record.run_id)));
     println!(
         "  {}",
         ui::kv(
@@ -563,8 +563,8 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
             "status",
             format!(
                 "{} -> {}",
-                status_word(run_a.record.scoring.overall_pass),
-                status_word(run_b.record.scoring.overall_pass)
+                val_a(status_word(run_a.record.scoring.overall_pass)),
+                val_b(status_word(run_b.record.scoring.overall_pass))
             )
         )
     );
@@ -574,9 +574,12 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
             "score",
             format!(
                 "{} -> {} ({})",
-                score_label(run_a.record.scoring.weighted_score),
-                score_label(run_b.record.scoring.weighted_score),
-                score_delta_label(output.score_delta)
+                val_a(score_label(run_a.record.scoring.weighted_score)),
+                val_b(score_label(run_b.record.scoring.weighted_score)),
+                val_delta(
+                    score_delta_label(output.score_delta),
+                    output.score_delta.unwrap_or(0.0)
+                )
             )
         )
     );
@@ -586,9 +589,12 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
             "duration",
             format!(
                 "{} -> {} ({})",
-                format_duration(run_a.record.runner.duration_ms),
-                format_duration(run_b.record.runner.duration_ms),
-                signed_duration(output.duration_delta_ms)
+                val_a(format_duration(run_a.record.runner.duration_ms)),
+                val_b(format_duration(run_b.record.runner.duration_ms)),
+                val_delta(
+                    signed_duration(output.duration_delta_ms),
+                    output.duration_delta_ms as f64
+                )
             )
         )
     );
@@ -597,8 +603,13 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
         ui::kv(
             "turns",
             format!(
-                "{} -> {} ({:+})",
-                run_a.record.runner.turns_used, run_b.record.runner.turns_used, output.turns_delta
+                "{} -> {} ({})",
+                val_a(run_a.record.runner.turns_used),
+                val_b(run_b.record.runner.turns_used),
+                val_delta(
+                    format!("{:+}", output.turns_delta),
+                    output.turns_delta as f64
+                )
             )
         )
     );
@@ -607,10 +618,13 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
         ui::kv(
             "tokens",
             format!(
-                "{} -> {} ({:+})",
-                run_a.record.cost.total_tokens(),
-                run_b.record.cost.total_tokens(),
-                output.tokens_delta
+                "{} -> {} ({})",
+                val_a(run_a.record.cost.total_tokens()),
+                val_b(run_b.record.cost.total_tokens()),
+                val_delta(
+                    format!("{:+}", output.tokens_delta),
+                    output.tokens_delta as f64
+                )
             )
         )
     );
@@ -618,7 +632,11 @@ fn print_compare(run_a: &LoadedTrace, run_b: &LoadedTrace, output: &CompareOutpu
         "    {}",
         ui::kv(
             "errors",
-            format!("{} -> {}", output.errors.count_a, output.errors.count_b)
+            format!(
+                "{} -> {}",
+                val_a(output.errors.count_a),
+                val_b(output.errors.count_b)
+            )
         )
     );
 
@@ -727,6 +745,28 @@ fn status_word(pass: bool) -> &'static str {
     } else {
         "FAIL"
     }
+}
+
+/// Left-hand (run A) value, painted blue.
+fn val_a(value: impl std::fmt::Display) -> String {
+    ui::paint(&value.to_string(), Tone::Info)
+}
+
+/// Right-hand (run B) value, painted yellow.
+fn val_b(value: impl std::fmt::Display) -> String {
+    ui::paint(&value.to_string(), Tone::Warning)
+}
+
+/// Delta value: green when positive, red when negative, muted when zero.
+fn val_delta(value: impl std::fmt::Display, sign: f64) -> String {
+    let tone = if sign > 0.0 {
+        Tone::Success
+    } else if sign < 0.0 {
+        Tone::Error
+    } else {
+        Tone::Muted
+    };
+    ui::paint(&value.to_string(), tone)
 }
 
 fn score_label(score: Option<f64>) -> String {
