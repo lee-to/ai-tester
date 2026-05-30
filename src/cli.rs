@@ -58,6 +58,29 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    #[command(about = "Show score trend from recorded v2 traces")]
+    Trend {
+        skill: String,
+        #[arg(long)]
+        scenario: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        last: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Diff two recorded runs side-by-side")]
+    Compare {
+        run_a: String,
+        run_b: String,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(about = "Pretty-print a recorded trace")]
+    Trace {
+        run_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     Runtimes,
     #[command(about = "Not implemented yet: planned orphan sandbox cleanup")]
     SandboxPrune {
@@ -118,6 +141,27 @@ pub fn main_entry() -> anyhow::Result<()> {
             last,
             json,
         })?,
+        Commands::Trend {
+            skill,
+            scenario,
+            last,
+            json,
+        } => crate::commands::recorded_runs::trend_command(
+            crate::commands::recorded_runs::TrendOptions {
+                skill,
+                scenario,
+                last,
+                json,
+            },
+        )?,
+        Commands::Compare { run_a, run_b, json } => {
+            crate::commands::recorded_runs::compare_command(
+                crate::commands::recorded_runs::CompareOptions { run_a, run_b, json },
+            )?
+        }
+        Commands::Trace { run_id, json } => crate::commands::recorded_runs::trace_command(
+            crate::commands::recorded_runs::TraceOptions { run_id, json },
+        )?,
         Commands::Runtimes => {
             println!("{}", crate::ui::header("ai-tester", "runtimes"));
             for status in crate::runtime::list_runtime_statuses() {

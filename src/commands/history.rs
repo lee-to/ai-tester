@@ -1,9 +1,6 @@
-use std::fs;
-use std::path::{Path, PathBuf};
-
 use serde::Serialize;
 
-use crate::trace::TraceRecord;
+use crate::commands::trace_files::{load_v2_traces, LoadedTrace};
 use crate::ui::{self, Tone};
 
 #[derive(Debug, Clone)]
@@ -34,8 +31,8 @@ struct HistoryEntry {
 }
 
 pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
-    let runs_dir = std::env::current_dir()?.join("runs");
-    if !runs_dir.is_dir() {
+    let (runs_exists, traces) = load_v2_traces()?;
+    if !runs_exists {
         println!("{}", ui::header("ai-tester", "history"));
         println!(
             "  {} {}",
@@ -46,27 +43,22 @@ pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
     }
 
     let mut entries = Vec::new();
-    for path in json_files_under(&runs_dir)? {
-        let raw = fs::read_to_string(&path)?;
-        let record = match serde_json::from_str::<TraceRecord>(&raw) {
-            Ok(record) if record.schema_version == "2.0.0" => record,
-            _ => continue,
-        };
+    for trace in traces {
         if opts
             .skill
             .as_ref()
-            .is_some_and(|skill| *skill != record.skill.name)
+            .is_some_and(|skill| *skill != trace.record.skill.name)
         {
             continue;
         }
         if opts
             .scenario
             .as_ref()
-            .is_some_and(|scenario| *scenario != record.scenario.name)
+            .is_some_and(|scenario| *scenario != trace.record.scenario.name)
         {
             continue;
         }
-        entries.push(to_entry(record, path));
+        entries.push(to_entry(trace));
     }
 
     entries.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
@@ -114,24 +106,13 @@ pub fn history_command(opts: HistoryOptions) -> anyhow::Result<i32> {
     Ok(0)
 }
 
-fn json_files_under(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(root) {
-        let entry = entry?;
-        if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "json")
-        {
-            out.push(entry.path().to_path_buf());
-        }
-    }
-    Ok(out)
-}
-
-fn to_entry(record: TraceRecord, path: PathBuf) -> HistoryEntry {
+fn to_entry(trace: LoadedTrace) -> HistoryEntry {
+    let record = trace.record;
     let tokens_total = record.cost.total_tokens();
     let token_budget = record.scenario.token_budget.or(record.skill.token_budget);
     HistoryEntry {
         run_id: record.run_id,
-        file_path: path.display().to_string(),
+        file_path: trace.path.display().to_string(),
         skill: record.skill.name,
         scenario: record.scenario.name,
         finished_at: record
