@@ -346,6 +346,8 @@ fn cli_history_and_trend_skip_invalid_and_non_v2_traces() {
     let runs_dir = tmp.path().join("runs/demo");
     fs::create_dir_all(&runs_dir).expect("runs dir");
     fs::write(runs_dir.join("broken.json"), "{not json").expect("invalid json written");
+    fs::write(runs_dir.join("unreadable-utf8.json"), [0xff, 0xfe, 0xfd])
+        .expect("non-utf8 json written");
     fs::write(
         runs_dir.join("old-schema.json"),
         "{\"schemaVersion\":\"1.0.0\",\"runId\":\"old-schema\"}\n",

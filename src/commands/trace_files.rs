@@ -17,12 +17,14 @@ pub(crate) fn load_v2_traces() -> anyhow::Result<(bool, Vec<LoadedTrace>)> {
 
     let mut traces = Vec::new();
     for entry in walkdir::WalkDir::new(&runs_dir) {
-        let entry = entry?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let is_json = entry.path().extension().is_some_and(|ext| ext == "json");
         if !entry.file_type().is_file() || !is_json {
             continue;
         }
-        if let Some(trace) = read_v2_trace(entry.path())? {
+        if let Some(trace) = read_v2_trace(entry.path()).unwrap_or(None) {
             traces.push(trace);
         }
     }
