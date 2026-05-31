@@ -226,6 +226,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             progress: verbose,
+            idle_warn_seconds: opts.idle_warn_seconds,
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
         }) {

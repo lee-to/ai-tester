@@ -567,6 +567,7 @@ pub struct RuntimeRunRequest {
     pub allowed_tools: Vec<String>,
     pub skill_install_rel_path: Option<String>,
     pub progress: bool,
+    pub idle_warn_seconds: u64,
     pub acp_agent_name: Option<String>,
     pub acp_agent: Option<crate::config::AcpAgentConfig>,
 }
@@ -1611,6 +1612,7 @@ mod tests {
             allowed_tools: vec!["Read".to_string(), "Bash(git *)".to_string()],
             skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
             progress: false,
+            idle_warn_seconds: 30,
             acp_agent_name: None,
             acp_agent: None,
         };

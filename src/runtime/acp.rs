@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use agent_client_protocol::schema::{
     CloseSessionRequest, ContentBlock, InitializeRequest, ProtocolVersion,
@@ -15,6 +17,7 @@ use serde_json::{Map, Value};
 use crate::config::AcpAgentConfig;
 use crate::scenario::{Runner, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, Turn};
+use crate::ui::{self, Tone};
 use crate::util::regex::compile_pattern;
 
 use super::{RuntimeRunRequest, RuntimeRunResult};
@@ -44,6 +47,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let process_cwd = req.cwd.clone();
     let session_cwd = acp_session_cwd(&process_cwd);
     let user_messages = build_acp_user_messages(&req);
+    let idle_timeout = Duration::from_secs(req.idle_warn_seconds.max(1));
     let policy = Arc::new(PermissionPolicy::from_runner(
         &req.scenario.runner,
         &req.allowed_tools,
@@ -70,10 +74,14 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         .connect_with(
             acp_agent,
             move |connection: ConnectionTo<Agent>| async move {
-                connection
-                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                    .block_task()
-                    .await?;
+                tokio::time::timeout(
+                    idle_timeout,
+                    connection
+                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .block_task(),
+                )
+                .await
+                .map_err(|_| acp_timeout_error("initialize", idle_timeout))??;
 
                 connection
                     .build_session(&session_cwd)
@@ -89,6 +97,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                             source: "acp".to_string(),
                         };
                         out.session_id = Some(session.session_id().to_string());
+                        let mut progress = req.progress.then(AcpProgress::new);
 
                         let user_message_count = user_messages.len();
                         for (message_index, user_message) in user_messages.into_iter().enumerate() {
@@ -109,11 +118,20 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
 
                             session.send_prompt(user_message)?;
                             loop {
-                                match session.read_update().await? {
+                                let message =
+                                    tokio::time::timeout(idle_timeout, session.read_update())
+                                        .await
+                                        .map_err(|_| {
+                                            acp_timeout_error("session update", idle_timeout)
+                                        })??;
+                                match message {
                                     SessionMessage::SessionMessage(dispatch) => {
                                         MatchDispatch::new(dispatch)
                                             .if_notification(
                                                 async |notification: SessionNotification| {
+                                                    if let Some(progress) = &mut progress {
+                                                        progress.print_update(&notification.update);
+                                                    }
                                                     apply_session_update(
                                                         notification.update,
                                                         &mut out,
@@ -126,6 +144,9 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                                     }
                                     SessionMessage::StopReason(reason) => {
                                         out.stopped_reason = stop_reason_to_string(reason);
+                                        if let Some(progress) = &mut progress {
+                                            progress.stop_reason(&out.stopped_reason);
+                                        }
                                         break;
                                     }
                                     _ => {}
@@ -139,17 +160,20 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                             }
                         }
 
-                        let _ = session
+                        let close_request = session
                             .connection()
                             .send_request_to(
                                 Agent,
                                 CloseSessionRequest::new(session.session_id().clone()),
                             )
-                            .block_task()
-                            .await;
+                            .block_task();
+                        let _ = tokio::time::timeout(idle_timeout, close_request).await;
 
                         if out.stopped_reason == "other" && out.errors.is_empty() {
                             out.stopped_reason = "end_turn".to_string();
+                        }
+                        if let Some(mut progress) = progress {
+                            progress.finish();
                         }
                         Ok(out)
                     })
@@ -165,6 +189,112 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     Ok(result)
 }
 
+struct AcpProgress {
+    live: Option<super::LiveProgress>,
+    active_tools: HashMap<String, String>,
+}
+
+impl AcpProgress {
+    fn new() -> Self {
+        Self {
+            live: super::LiveProgress::new(),
+            active_tools: HashMap::new(),
+        }
+    }
+
+    fn print_update(&mut self, update: &SessionUpdate) {
+        match update {
+            SessionUpdate::AgentMessageChunk(chunk) => {
+                let text = content_block_to_string(&chunk.content);
+                if text.trim().is_empty() {
+                    self.status("Assistant message");
+                } else {
+                    self.status(&format!(
+                        "Assistant: {}",
+                        super::truncate_progress_value(text.trim(), 120)
+                    ));
+                }
+            }
+            SessionUpdate::ToolCall(tool_call) => {
+                let label = acp_tool_call_label(
+                    &tool_call.title,
+                    &tool_kind_to_string(tool_call.kind),
+                    tool_call.raw_input.as_ref(),
+                );
+                self.active_tools
+                    .insert(tool_call.tool_call_id.to_string(), label.clone());
+                match tool_call.status {
+                    ToolCallStatus::Completed => self.completed(&label, Tone::Success),
+                    ToolCallStatus::Failed => self.completed(&label, Tone::Error),
+                    _ => self.status(&label),
+                }
+            }
+            SessionUpdate::ToolCallUpdate(update) => {
+                let id = update.tool_call_id.to_string();
+                let label = self
+                    .active_tools
+                    .entry(id.clone())
+                    .or_insert_with(|| {
+                        let title = update.fields.title.as_deref().unwrap_or("ACP tool call");
+                        let kind = update
+                            .fields
+                            .kind
+                            .map(tool_kind_to_string)
+                            .unwrap_or_else(|| "tool".to_string());
+                        acp_tool_call_label(title, &kind, update.fields.raw_input.as_ref())
+                    })
+                    .clone();
+                match update.fields.status {
+                    Some(ToolCallStatus::Completed) => {
+                        self.active_tools.remove(&id);
+                        self.completed(&label, Tone::Success);
+                    }
+                    Some(ToolCallStatus::Failed) => {
+                        self.active_tools.remove(&id);
+                        self.completed(&label, Tone::Error);
+                    }
+                    _ => self.status(&label),
+                }
+            }
+            SessionUpdate::Plan(_) => self.status("Plan update"),
+            _ => {}
+        }
+    }
+
+    fn stop_reason(&mut self, reason: &str) {
+        let tone = match reason {
+            "end_turn" => Tone::Success,
+            "cancelled" | "refusal" | "max_turns" => Tone::Warning,
+            "error" => Tone::Error,
+            _ => Tone::Muted,
+        };
+        self.completed(&format!("ACP stop: {reason}"), tone);
+    }
+
+    fn status(&mut self, text: &str) {
+        if let Some(live) = &self.live {
+            live.set_status(text);
+        } else {
+            println!("    {} {text}", ui::tag("acp", Tone::Info));
+        }
+    }
+
+    fn completed(&mut self, text: &str, tone: Tone) {
+        if let Some(live) = &self.live {
+            live.print_completed(text, tone);
+            live.set_status("Processing");
+        } else {
+            println!("    {} {text}", ui::tag("acp", tone));
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(live) = &mut self.live {
+            live.finish();
+        }
+    }
+}
+
 fn acp_session_cwd(cwd: &Path) -> PathBuf {
     #[cfg(windows)]
     {
@@ -177,6 +307,39 @@ fn acp_session_cwd(cwd: &Path) -> PathBuf {
         }
     }
     cwd.to_path_buf()
+}
+
+fn acp_timeout_error(stage: &str, idle_timeout: Duration) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::new(
+        -32000,
+        format!(
+            "ACP agent did not produce `{stage}` protocol progress within {}s; verify the configured command starts an ACP stdio server",
+            idle_timeout.as_secs()
+        ),
+    )
+}
+
+fn acp_tool_call_label(title: &str, kind: &str, raw_input: Option<&Value>) -> String {
+    let detail = raw_input
+        .and_then(|input| {
+            input
+                .get("command")
+                .or_else(|| input.get("path"))
+                .or_else(|| input.get("file_path"))
+                .or_else(|| input.get("pattern"))
+                .and_then(Value::as_str)
+        })
+        .map(|value| super::truncate_progress_value(value, 120))
+        .or_else(|| {
+            raw_input
+                .filter(|input| !input.is_null())
+                .map(|input| super::truncate_progress_value(&input.to_string(), 120))
+        });
+    let name = if title.trim().is_empty() { kind } else { title };
+    match detail {
+        Some(detail) if !detail.is_empty() => format!("{name}({detail})"),
+        _ => name.to_string(),
+    }
 }
 
 fn build_acp_agent(config: &AcpAgentConfig) -> anyhow::Result<AcpAgent> {
