@@ -39,6 +39,8 @@ enum Commands {
         #[arg(long)]
         runtime: Option<String>,
         #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
         filter: Option<String>,
         #[arg(long)]
         dry_run: bool,
@@ -129,6 +131,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             dir,
             model,
             runtime,
+            agent,
             filter,
             dry_run,
             keep_sandbox,
@@ -142,6 +145,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             dir,
             model,
             runtime,
+            agent,
             filter,
             dry_run,
             keep_sandbox,
@@ -183,7 +187,8 @@ pub fn main_entry() -> anyhow::Result<()> {
         )?,
         Commands::Runtimes => {
             println!("{}", crate::ui::header("ai-tester", "runtimes"));
-            for status in crate::runtime::list_runtime_statuses() {
+            let config = crate::config::load_project_config(std::env::current_dir()?)?;
+            for status in crate::runtime::list_runtime_statuses(&config) {
                 let tone = if status.ready {
                     crate::ui::Tone::Success
                 } else {
@@ -193,9 +198,9 @@ pub fn main_entry() -> anyhow::Result<()> {
                 println!(
                     "  {} {} {} {}",
                     crate::ui::paint("●", tone),
-                    crate::ui::paint(status.name, crate::ui::Tone::Warning),
+                    crate::ui::paint(&status.name, crate::ui::Tone::Warning),
                     crate::ui::paint(label, tone),
-                    crate::ui::paint(status.description, crate::ui::Tone::Muted)
+                    crate::ui::paint(&status.description, crate::ui::Tone::Muted)
                 );
                 if let Some(message) = status.message {
                     println!("    {}", crate::ui::kv("reason", message));

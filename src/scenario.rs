@@ -92,6 +92,7 @@ pub struct ScenarioSourceMeta {
     pub runner_runtime_set: bool,
     pub runner_model_set: bool,
     pub runner_permission_mode_set: bool,
+    pub runner_agent_set: bool,
 }
 
 pub fn load_scenario_file(path: impl AsRef<Path>) -> anyhow::Result<LoadedScenario> {
@@ -119,6 +120,9 @@ fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
             .is_some_and(|value| !value.is_null()),
         runner_permission_mode_set: runner
             .and_then(|runner| runner.get("permission_mode"))
+            .is_some_and(|value| !value.is_null()),
+        runner_agent_set: runner
+            .and_then(|runner| runner.get("agent"))
             .is_some_and(|value| !value.is_null()),
     }
 }
@@ -161,6 +165,7 @@ pub struct Runner {
     pub model: String,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    pub agent: Option<String>,
     pub allowed_tools_override: Option<Vec<String>>,
     pub setting_sources: Option<Vec<String>>,
 }
@@ -171,6 +176,7 @@ impl Default for Runner {
             runtime: default_runtime(),
             model: default_model(),
             permission_mode: default_permission_mode(),
+            agent: None,
             allowed_tools_override: None,
             setting_sources: None,
         }

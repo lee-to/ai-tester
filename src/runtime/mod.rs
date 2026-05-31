@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -15,9 +15,11 @@ use crate::scenario::{Scenario, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, TraceError, Turn, TurnUsage};
 use crate::ui::{self, Tone};
 
+pub mod acp;
+
 pub struct RuntimeStatus {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub ready: bool,
     pub message: Option<String>,
 }
@@ -481,14 +483,77 @@ fn stringify_value(value: &Value) -> String {
     }
 }
 
-pub fn list_runtime_statuses() -> Vec<RuntimeStatus> {
-    vec![
+pub fn list_runtime_statuses(config: &crate::config::ProjectConfig) -> Vec<RuntimeStatus> {
+    let mut statuses = vec![
         preflight(
             "claude",
             "Claude Code via `claude -p --output-format stream-json`.",
         ),
         preflight("codex", "OpenAI Codex via `codex exec --json`."),
-    ]
+    ];
+    for (name, agent) in &config.acp_agents {
+        statuses.push(preflight_dynamic(
+            format!("acp:{name}"),
+            format!(
+                "ACP agent via `{}`{}.",
+                agent.command,
+                if agent.args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", agent.args.join(" "))
+                }
+            ),
+            &agent.command,
+        ));
+    }
+    statuses
+}
+
+pub fn runtime_status_for_scenario(
+    scenario: &Scenario,
+    config: &crate::config::ProjectConfig,
+) -> RuntimeStatus {
+    match scenario.runner.runtime.as_str() {
+        "acp" => {
+            let Some(agent_name) = scenario.runner.agent.as_deref() else {
+                return RuntimeStatus {
+                    name: "acp".to_string(),
+                    description: "Generic Agent Client Protocol runtime.".to_string(),
+                    ready: false,
+                    message: Some(
+                        "`runtime: acp` requires `runner.agent`, `defaults.agent`, or `--agent`"
+                            .to_string(),
+                    ),
+                };
+            };
+            let Some(agent) = config.acp_agents.get(agent_name) else {
+                return RuntimeStatus {
+                    name: format!("acp:{agent_name}"),
+                    description: "Configured ACP agent.".to_string(),
+                    ready: false,
+                    message: Some(format!(
+                        "`runtime: acp` references unknown agent `{agent_name}`"
+                    )),
+                };
+            };
+            preflight_dynamic(
+                format!("acp:{agent_name}"),
+                format!("ACP agent via `{}`.", agent.command),
+                &agent.command,
+            )
+        }
+        "claude" => preflight(
+            "claude",
+            "Claude Code via `claude -p --output-format stream-json`.",
+        ),
+        "codex" => preflight("codex", "OpenAI Codex via `codex exec --json`."),
+        other => RuntimeStatus {
+            name: other.to_string(),
+            description: "Unknown runtime.".to_string(),
+            ready: false,
+            message: Some(format!("unknown runtime `{other}`")),
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -502,6 +567,9 @@ pub struct RuntimeRunRequest {
     pub allowed_tools: Vec<String>,
     pub skill_install_rel_path: Option<String>,
     pub progress: bool,
+    pub idle_warn_seconds: u64,
+    pub acp_agent_name: Option<String>,
+    pub acp_agent: Option<crate::config::AcpAgentConfig>,
 }
 
 pub fn runtime_ready(name: &str) -> bool {
@@ -510,6 +578,7 @@ pub fn runtime_ready(name: &str) -> bool {
 
 pub fn run_runtime(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
     match req.runtime.as_str() {
+        "acp" => acp::run_acp(req),
         "codex" => run_codex(req),
         "claude" => run_claude(req),
         other => anyhow::bail!("unknown runtime `{other}`"),
@@ -1446,8 +1515,12 @@ fn map_codex_permission_mode(mode: &str) -> &'static str {
     }
 }
 
-fn preflight(name: &'static str, description: &'static str) -> RuntimeStatus {
-    let ready = command_exists(name);
+fn preflight(name: &str, description: &str) -> RuntimeStatus {
+    preflight_dynamic(name.to_string(), description.to_string(), name)
+}
+
+fn preflight_dynamic(name: String, description: String, command: &str) -> RuntimeStatus {
+    let ready = command_exists(command);
     RuntimeStatus {
         name,
         description,
@@ -1455,12 +1528,17 @@ fn preflight(name: &'static str, description: &'static str) -> RuntimeStatus {
         message: if ready {
             None
         } else {
-            Some(format!("`{name}` CLI not found on PATH"))
+            Some(format!("`{command}` CLI not found on PATH"))
         },
     }
 }
 
 fn command_exists(name: &str) -> bool {
+    let path = Path::new(name);
+    if path.is_absolute() || path.components().count() > 1 {
+        return path.is_file();
+    }
+
     #[cfg(windows)]
     let mut cmd = {
         let mut cmd = Command::new("where");
@@ -1534,6 +1612,9 @@ mod tests {
             allowed_tools: vec!["Read".to_string(), "Bash(git *)".to_string()],
             skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
             progress: false,
+            idle_warn_seconds: 30,
+            acp_agent_name: None,
+            acp_agent: None,
         };
 
         let args = build_claude_args(&req, 3, None, "do it", true);

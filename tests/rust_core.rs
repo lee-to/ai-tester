@@ -2,6 +2,7 @@ use ai_tester::assertions::{compute_weighted_score, evaluate_assertions};
 use ai_tester::config::load_project_config;
 use ai_tester::runtime::{
     parse_claude_jsonl, parse_claude_jsonl_with_user_responses, parse_codex_jsonl,
+    runtime_status_for_scenario,
 };
 use ai_tester::scenario::{load_scenario_file, AssertionSpec, Scenario, UserResponse};
 use ai_tester::skill::allowed_tools::tokenize_allowed_tools;
@@ -59,6 +60,16 @@ fn scenario_loader_tracks_explicit_runner_fields() {
     assert!(!loaded.source_meta.runner_runtime_set);
     assert!(loaded.source_meta.runner_model_set);
     assert!(loaded.source_meta.runner_permission_mode_set);
+
+    std::fs::write(
+        &scenario_path,
+        "scenario: acp-agent\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  agent: local\n",
+    )
+    .expect("scenario written");
+    let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
+    assert_eq!(loaded.scenario.runner.agent.as_deref(), Some("local"));
+    assert!(loaded.source_meta.runner_runtime_set);
+    assert!(loaded.source_meta.runner_agent_set);
 }
 
 #[test]
@@ -109,6 +120,52 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     assert_eq!(config.skills_dir, tmp.path().join("custom-skills"));
     assert_eq!(config.defaults.model.as_deref(), Some("custom"));
     assert_eq!(config.defaults.permission_mode.as_deref(), Some("plan"));
+}
+
+#[test]
+fn project_config_parses_acp_agent_registry_and_default_agent() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\ndefaults:\n  runtime: acp\n  agent: local\nacp_agents:\n  local:\n    command: fake-acp\n    args: [--stdio]\n    env:\n      ACP_FLAG: \"1\"\n",
+    )
+    .expect("config written");
+
+    let config = load_project_config(tmp.path()).expect("config loads");
+
+    assert_eq!(config.defaults.runtime.as_deref(), Some("acp"));
+    assert_eq!(config.defaults.agent.as_deref(), Some("local"));
+    let local = config.acp_agents.get("local").expect("local acp agent");
+    assert_eq!(local.command, "fake-acp");
+    assert_eq!(local.args, vec!["--stdio"]);
+    assert_eq!(local.env.get("ACP_FLAG").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn acp_runtime_preflight_accepts_configured_absolute_command_path() {
+    let tmp = TempDir::new().expect("temp dir");
+    let current_exe = std::env::current_exe().expect("current exe");
+    let current_exe = current_exe.to_string_lossy().replace('\\', "/");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        format!(
+            "skills_dir: ./skills\nacp_agents:\n  local:\n    command: {current_exe}\n    args: []\n"
+        ),
+    )
+    .expect("config written");
+
+    let config = load_project_config(tmp.path()).expect("config loads");
+    let scenario = Scenario::from_yaml_str(
+        "scenario: acp-absolute-command\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  agent: local\n",
+    )
+    .expect("scenario parses");
+
+    let status = runtime_status_for_scenario(&scenario, &config);
+    assert!(
+        status.ready,
+        "unexpected runtime status: {}",
+        status.message.unwrap_or_else(|| "no message".to_string())
+    );
 }
 
 #[test]

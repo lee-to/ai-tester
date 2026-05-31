@@ -33,6 +33,7 @@ pub struct RunOptions {
     pub dir: Option<PathBuf>,
     pub model: Option<String>,
     pub runtime: Option<String>,
+    pub agent: Option<String>,
     pub filter: Option<String>,
     pub dry_run: bool,
     pub keep_sandbox: bool,
@@ -140,7 +141,9 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             .clone()
             .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
-        if !crate::runtime::runtime_ready(&runtime_name) {
+        let config = load_project_config(std::env::current_dir()?)?;
+        let runtime_status = crate::runtime::runtime_status_for_scenario(&scenario, &config);
+        if !runtime_status.ready {
             if !silent {
                 println!(
                     "{} {}",
@@ -149,14 +152,27 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 );
                 println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
                 println!(
-                    "  {} `{runtime_name}` runtime is not ready",
-                    ui::label("reason")
+                    "  {} {}",
+                    ui::label("reason"),
+                    runtime_status.message.unwrap_or_else(|| {
+                        format!("`{}` runtime is not ready", runtime_status.name)
+                    })
                 );
                 println!();
             }
             runtime_errors += 1;
             continue;
         }
+        let acp_agent = if runtime_name == "acp" {
+            scenario
+                .runner
+                .agent
+                .as_deref()
+                .and_then(|name| config.acp_agents.get(name))
+                .cloned()
+        } else {
+            None
+        };
 
         if !silent {
             print_scenario_start(idx + 1, total, &loaded, &scenario, &skill);
@@ -210,6 +226,9 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
             progress: verbose,
+            idle_warn_seconds: opts.idle_warn_seconds,
+            acp_agent_name: scenario.runner.agent.clone(),
+            acp_agent,
         }) {
             Ok(result) => result,
             Err(err) => {
@@ -390,7 +409,10 @@ fn render_markdown(records: &[TraceRecord]) -> String {
         }
         out.push_str(&format!("## {}\n\n", record.scenario.name));
         for assertion in record.assertions.iter().filter(|a| !a.pass) {
-            out.push_str(&format!("- ❌ **{}**: {}\n", assertion.id, assertion.detail));
+            out.push_str(&format!(
+                "- ❌ **{}**: {}\n",
+                assertion.id, assertion.detail
+            ));
         }
         for error in &record.errors {
             out.push_str(&format!("- ⚠️ **{}**: {}\n", error.kind, error.message));
@@ -557,6 +579,14 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
     if let Some(runtime) = opts.runtime.clone() {
         scenario.runner.runtime = runtime;
     }
+    if !loaded.source_meta.runner_agent_set {
+        if let Some(agent) = config.defaults.agent {
+            scenario.runner.agent = Some(agent);
+        }
+    }
+    if let Some(agent) = opts.agent.clone() {
+        scenario.runner.agent = Some(agent);
+    }
     Ok(scenario)
 }
 
@@ -581,6 +611,9 @@ fn print_run_banner(total: usize, opts: &RunOptions) {
     );
     if let Some(runtime) = &opts.runtime {
         println!("  {}", ui::kv("runtime", ui::paint(runtime, Tone::Info)));
+    }
+    if let Some(agent) = &opts.agent {
+        println!("  {}", ui::kv("agent", ui::paint(agent, Tone::Info)));
     }
     if let Some(model) = &opts.model {
         println!("  {}", ui::kv("model", ui::paint(model, Tone::Info)));
@@ -650,6 +683,9 @@ fn print_scenario_dry_run(loaded: &LoadedScenario, scenario: &Scenario) {
         ui::kv("prompt", prompt_preview_for_scenario(scenario))
     );
     println!("    {}", ui::kv("runtime", &scenario.runner.runtime));
+    if let Some(agent) = &scenario.runner.agent {
+        println!("    {}", ui::kv("agent", agent));
+    }
     println!("    {}", ui::kv("model", &scenario.runner.model));
     println!(
         "    {}",

@@ -18,7 +18,7 @@ LLM tests that mock the model are easy to write and weak at catching production 
 
 - **Native Rust CLI.** No Node runtime or embedded SDK dependency.
 - **Real runs, real tools.** Scenarios execute inside an isolated temporary sandbox.
-- **Multi-runtime.** Built-in adapters for Claude Code and OpenAI Codex through their installed CLIs.
+- **Multi-runtime.** Built-in adapters for Claude Code and OpenAI Codex through their installed CLIs, plus generic ACP agents configured per project.
 - **Three prompt sources.** Test a packaged skill, an inline `system_prompt`, or an external prompt file.
 - **Scripted user turns.** Use `user_prompt` or `user_prompts` for custom session flow.
 - **Declarative assertions.** `tool_called`, `tool_call_sequence`, `no_tool_called`, `output_contains`, `no_output_contains`, `file_read`, `turn_count_at_most`, and `no_path_escape`.
@@ -57,6 +57,7 @@ Per runtime you plan to use:
 
 - **Claude** (`runtime: claude`, default): `claude` CLI installed and logged in.
 - **Codex** (`runtime: codex`): `codex` CLI installed and logged in.
+- **ACP** (`runtime: acp`): a configured ACP agent command in `.ai-tester.yaml`.
 
 Check local readiness:
 
@@ -94,6 +95,16 @@ skills_dir: ./skills
 defaults:
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
+  # Optional for ACP:
+  # runtime: acp
+  # agent: gemini
+
+# Optional ACP agent registry:
+# acp_agents:
+#   gemini:
+#     command: gemini
+#     args: ["--experimental-acp"]
+#     env: {}
 ```
 
 With this file at a project root, skills live at:
@@ -120,6 +131,7 @@ ai-tester run
 ai-tester run <skill>
 ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
 ai-tester run --dir ./prompts --runtime codex
 
 # Choose output format (default: live events + summary)
@@ -237,6 +249,15 @@ assertions:
   - id: says-done
     type: output_contains
     pattern: "\\bdone\\b"
+```
+
+ACP scenarios select a configured agent by name:
+
+```yaml
+runner:
+  runtime: acp
+  agent: gemini
+  permission_mode: bypassPermissions
 ```
 
 ### Skill Scenario Example
@@ -437,6 +458,38 @@ pattern: "(?is)hello.*world"
 ## Runtime Adapters
 
 The Rust rewrite uses external CLIs and parses JSONL output. It does not embed the previous Node SDKs.
+
+### ACP
+
+ACP agents are configured in `.ai-tester.yaml`:
+
+```yaml
+defaults:
+  runtime: acp
+  agent: gemini
+
+acp_agents:
+  gemini:
+    command: gemini
+    args: ["--experimental-acp"]
+    env: {}
+```
+
+Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, then sends each scripted user prompt through that session. `runner.model` is not sent over ACP in this MVP; pass model or mode flags through the configured `args`.
+
+ACP traces count one assistant turn per scripted user prompt sent to the ACP session. This differs from the Claude and Codex adapters, which derive turns from their runtime event streams. As a result, `turn_count_at_most` and explicit `max_turns` limits are comparable within ACP runs but not strictly identical across runtimes.
+
+ACP tool calls are normalized using `toolCall.kind` as the trace tool name, such as `execute`, `read`, or `edit`. The trace input contains `rawInput` fields plus `_acpTitle`, `_acpKind`, `_acpStatus`, `_acpLocations`, and `_acpRawOutput` metadata when provided by the agent.
+
+Permission requests are answered automatically:
+
+| Scenario `permission_mode` | ACP behavior |
+| --- | --- |
+| `bypassPermissions`, `allow` | Select an allow option, or the first option if no allow option is labelled. |
+| `plan`, `deny` | Select a reject option, or cancel if none exists. |
+| `acceptEdits` | Allow only when resolved allowed-tool regexes (scenario `allowed_tools_override`, otherwise skill `allowed-tools`) match the ACP kind, title, or raw input; otherwise reject. |
+
+`user_responses` can override the policy by matching the permission text and choosing an option by `optionId`, name, or kind.
 
 ### Codex
 
