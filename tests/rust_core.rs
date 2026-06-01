@@ -99,16 +99,22 @@ fn scenario_loader_tracks_explicit_runner_fields() {
     assert!(loaded.source_meta.runner_runtime_set);
     assert!(!loaded.source_meta.runner_model_set);
     assert!(!loaded.source_meta.runner_permission_mode_set);
+    assert!(!loaded.source_meta.runner_mode_set);
+    assert!(!loaded.source_meta.runner_reasoning_set);
 
     std::fs::write(
         &scenario_path,
-        "scenario: explicit\nsystem_prompt: Body\nrunner:\n  model: explicit-model\n  permission_mode: plan\n",
+        "scenario: explicit\nsystem_prompt: Body\nrunner:\n  model: explicit-model\n  permission_mode: plan\n  mode: review\n  reasoning: high\n",
     )
     .expect("scenario written");
     let loaded = load_scenario_file(&scenario_path).expect("scenario loads");
     assert!(!loaded.source_meta.runner_runtime_set);
     assert!(loaded.source_meta.runner_model_set);
     assert!(loaded.source_meta.runner_permission_mode_set);
+    assert!(loaded.source_meta.runner_mode_set);
+    assert!(loaded.source_meta.runner_reasoning_set);
+    assert_eq!(loaded.scenario.runner.mode.as_deref(), Some("review"));
+    assert_eq!(loaded.scenario.runner.reasoning.as_deref(), Some("high"));
 
     std::fs::write(
         &scenario_path,
@@ -160,7 +166,7 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     std::fs::create_dir_all(&nested).expect("nested created");
     std::fs::write(
         tmp.path().join(".ai-tester.yaml"),
-        "skills_dir: ./custom-skills\ndefaults:\n  model: custom\n  permission_mode: plan\n",
+        "skills_dir: ./custom-skills\ndefaults:\n  model: custom\n  permission_mode: plan\n  mode: review\n  reasoning: high\n",
     )
     .expect("config written");
 
@@ -169,6 +175,8 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     assert_eq!(config.skills_dir, tmp.path().join("custom-skills"));
     assert_eq!(config.defaults.model.as_deref(), Some("custom"));
     assert_eq!(config.defaults.permission_mode.as_deref(), Some("plan"));
+    assert_eq!(config.defaults.mode.as_deref(), Some("review"));
+    assert_eq!(config.defaults.reasoning.as_deref(), Some("high"));
 }
 
 #[test]

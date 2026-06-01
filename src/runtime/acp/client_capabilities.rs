@@ -404,10 +404,7 @@ impl TerminalManager {
             if Instant::now() >= deadline {
                 let timeout_status = TerminalExitStatus::new().signal(Some("timeout".to_string()));
                 set_status_once(&entry.status, timeout_status.clone())?;
-                let pid = entry.pid;
-                thread::spawn(move || {
-                    let _ = kill_pid(pid);
-                });
+                let _ = kill_pid(entry.pid);
                 return Ok(WaitForTerminalExitResponse::new(timeout_status));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

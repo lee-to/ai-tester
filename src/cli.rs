@@ -37,6 +37,10 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        reasoning: Option<String>,
+        #[arg(long)]
         runtime: Option<String>,
         #[arg(long)]
         agent: Option<String>,
@@ -132,6 +136,8 @@ pub fn main_entry() -> anyhow::Result<()> {
             file,
             dir,
             model,
+            mode,
+            reasoning,
             runtime,
             agent,
             mcp_profile,
@@ -147,6 +153,8 @@ pub fn main_entry() -> anyhow::Result<()> {
             file,
             dir,
             model,
+            mode,
+            reasoning,
             runtime,
             agent,
             mcp_profile,

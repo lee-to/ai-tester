@@ -95,6 +95,8 @@ pub struct LoadedScenario {
 pub struct ScenarioSourceMeta {
     pub runner_runtime_set: bool,
     pub runner_model_set: bool,
+    pub runner_mode_set: bool,
+    pub runner_reasoning_set: bool,
     pub runner_permission_mode_set: bool,
     pub runner_agent_set: bool,
     pub runner_mcp_profile_set: bool,
@@ -122,6 +124,12 @@ fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
             .is_some_and(|value| !value.is_null()),
         runner_model_set: runner
             .and_then(|runner| runner.get("model"))
+            .is_some_and(|value| !value.is_null()),
+        runner_mode_set: runner
+            .and_then(|runner| runner.get("mode"))
+            .is_some_and(|value| !value.is_null()),
+        runner_reasoning_set: runner
+            .and_then(|runner| runner.get("reasoning"))
             .is_some_and(|value| !value.is_null()),
         runner_permission_mode_set: runner
             .and_then(|runner| runner.get("permission_mode"))
@@ -171,6 +179,8 @@ pub struct Runner {
     pub runtime: String,
     #[serde(default = "default_model")]
     pub model: String,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     pub agent: Option<String>,
@@ -184,6 +194,8 @@ impl Default for Runner {
         Self {
             runtime: default_runtime(),
             model: default_model(),
+            mode: None,
+            reasoning: None,
             permission_mode: default_permission_mode(),
             agent: None,
             mcp_profile: None,

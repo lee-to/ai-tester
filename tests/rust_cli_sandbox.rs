@@ -868,6 +868,96 @@ assertions:
 }
 
 #[test]
+fn cli_run_with_fake_acp_negotiates_model_mode_reasoning_and_traces() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_config_negotiation(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-config\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-config\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--quiet",
+            "--model",
+            "gpt-5-codex",
+            "--mode",
+            "plan",
+            "--reasoning",
+            "high",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_fake-acp-config"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    assert!(trace_json.contains("ACP effective config"));
+    assert!(trace_json.contains("gpt-5-codex"));
+    assert!(trace_json.contains("plan"));
+    assert!(trace_json.contains("high"));
+}
+
+#[test]
+fn cli_run_with_fake_acp_rejects_unsupported_explicit_model() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_config_negotiation(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-config\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-unsupported-model\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--model",
+            "unsupported",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains(
+            "unsupported ACP model `unsupported`",
+        ));
+}
+
+#[test]
 fn cli_run_acp_requires_configured_agent() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1730,6 +1820,215 @@ done
 "#,
         )
         .expect("fake acp mcp written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_config_negotiation(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-config.cmd");
+        let ps1_path = bin_dir.join("fake-acp-config.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-config.ps1\"\r\n",
+        )
+        .expect("fake acp config wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+function Fail-Request($id, $message) {
+    Write-Json @{
+        jsonrpc = "2.0"
+        id = $id
+        error = @{ code = -32000; message = $message }
+    }
+    exit 0
+}
+
+function Config-Options($mode, $model, $reasoning) {
+    @(
+        @{
+            id = "mode_selector"
+            name = "Mode"
+            category = "mode"
+            type = "select"
+            currentValue = $mode
+            options = @(
+                @{ value = "default"; name = "Default" },
+                @{ value = "plan"; name = "Plan" }
+            )
+        },
+        @{
+            id = "model_selector"
+            name = "Model"
+            category = "model"
+            type = "select"
+            currentValue = $model
+            options = @(
+                @{ value = "sonnet"; name = "Claude Sonnet" },
+                @{ value = "gpt-5-codex"; name = "GPT 5 Codex" }
+            )
+        },
+        @{
+            id = "reasoning"
+            name = "Reasoning"
+            category = "thought_level"
+            type = "select"
+            currentValue = $reasoning
+            options = @(
+                @{ value = "low"; name = "Low" },
+                @{ value = "medium"; name = "Medium" },
+                @{ value = "high"; name = "High" }
+            )
+        }
+    )
+}
+
+$mode = "default"
+$model = "sonnet"
+$reasoning = "medium"
+$applied = @()
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-config"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                sessionId = "s1"
+                configOptions = Config-Options $mode $model $reasoning
+            }
+        }
+    } elseif ($message.method -eq "session/set_config_option") {
+        $configId = [string]$message.params.configId
+        $value = [string]$message.params.value
+        if ($configId -eq "mode_selector" -and $value -eq "plan") {
+            $mode = $value
+        } elseif ($configId -eq "model_selector" -and $value -eq "gpt-5-codex") {
+            $model = $value
+        } elseif ($configId -eq "reasoning" -and $value -eq "high") {
+            $reasoning = $value
+        } else {
+            Fail-Request $message.id "unexpected config set $configId=$value"
+        }
+        $applied += $configId
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                configOptions = Config-Options $mode $model $reasoning
+            }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        if (($applied -join ",") -ne "mode_selector,model_selector,reasoning") {
+            Fail-Request $message.id "prompt arrived before expected config negotiation"
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp config script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-config");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+config_options() {
+  mode="$1"
+  model="$2"
+  reasoning="$3"
+  printf '"configOptions":[{"id":"mode_selector","name":"Mode","category":"mode","type":"select","currentValue":"%s","options":[{"value":"default","name":"Default"},{"value":"plan","name":"Plan"}]},{"id":"model_selector","name":"Model","category":"model","type":"select","currentValue":"%s","options":[{"value":"sonnet","name":"Claude Sonnet"},{"value":"gpt-5-codex","name":"GPT 5 Codex"}]},{"id":"reasoning","name":"Reasoning","category":"thought_level","type":"select","currentValue":"%s","options":[{"value":"low","name":"Low"},{"value":"medium","name":"Medium"},{"value":"high","name":"High"}]}]' "$mode" "$model" "$reasoning"
+}
+
+fail_request() {
+  id="$1"
+  message="$2"
+  echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"$message\"}}"
+  exit 0
+}
+
+mode="default"
+model="sonnet"
+reasoning="medium"
+applied=""
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-config\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",$(config_options "$mode" "$model" "$reasoning")}}"
+      ;;
+    *'"method":"session/set_config_option"'*|*'"method": "session/set_config_option"'*)
+      case "$line" in
+        *'"configId":"mode_selector"'*'"value":"plan"'*) mode="plan"; applied="${applied}mode_selector," ;;
+        *'"configId":"model_selector"'*'"value":"gpt-5-codex"'*) model="gpt-5-codex"; applied="${applied}model_selector," ;;
+        *'"configId":"reasoning"'*'"value":"high"'*) reasoning="high"; applied="${applied}reasoning," ;;
+        *) fail_request "$id" "unexpected config set" ;;
+      esac
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{$(config_options "$mode" "$model" "$reasoning")}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      if [ "$applied" != "mode_selector,model_selector,reasoning," ]; then
+        fail_request "$id" "prompt arrived before expected config negotiation"
+      fi
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp config written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");

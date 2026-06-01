@@ -26,6 +26,8 @@ pub struct ProjectConfig {
 pub struct ProjectDefaults {
     pub runtime: Option<String>,
     pub model: Option<String>,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     pub permission_mode: Option<String>,
     pub agent: Option<String>,
     pub mcp_profile: Option<String>,
@@ -105,6 +107,8 @@ struct RawProjectConfig {
 struct RawProjectDefaults {
     runtime: Option<String>,
     model: Option<String>,
+    mode: Option<String>,
+    reasoning: Option<String>,
     permission_mode: Option<String>,
     agent: Option<String>,
     mcp_profile: Option<String>,
@@ -151,6 +155,8 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             defaults: ProjectDefaults {
                 runtime: raw.defaults.as_ref().and_then(|d| d.runtime.clone()),
                 model: raw.defaults.as_ref().and_then(|d| d.model.clone()),
+                mode: raw.defaults.as_ref().and_then(|d| d.mode.clone()),
+                reasoning: raw.defaults.as_ref().and_then(|d| d.reasoning.clone()),
                 permission_mode: raw
                     .defaults
                     .as_ref()

@@ -9,9 +9,12 @@ use agent_client_protocol::schema::{
     KillTerminalRequest, McpServer, McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest,
     ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate, StopReason, TerminalOutputRequest, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
-    WriteTextFileRequest,
+    SessionConfigId, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelect, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionModeId, SessionModeState, SessionNotification, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
+    SetSessionModeResponse, StopReason, TerminalOutputRequest, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, SessionMessage};
@@ -184,111 +187,115 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
 
                 let session_request =
                     NewSessionRequest::new(session_cwd.clone()).mcp_servers(mcp_servers);
-                connection
-                    .build_session_from(session_request)
-                    .block_task()
-                    .run_until(async move |mut session| {
-                        let mut out = RuntimeRunResult::new(max_turns, max_turns_user_set);
-                        out.cost = TraceCost {
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            cache_creation_tokens: 0,
-                            cache_read_tokens: 0,
-                            usd_estimate: 0.0,
-                            source: "acp".to_string(),
-                        };
-                        out.session_id = Some(session.session_id().to_string());
-                        if let Some(diagnostic) = mcp_diagnostic {
-                            out.diagnostics.push(diagnostic);
-                        }
-                        client_bridge.set_session_id(session.session_id().to_string());
-                        let mut progress = req.progress.then(AcpProgress::new);
+                let session_response = tokio::time::timeout(
+                    idle_timeout,
+                    connection
+                        .send_request_to(Agent, session_request)
+                        .block_task(),
+                )
+                .await
+                .map_err(|_| acp_timeout_error("session/new", idle_timeout))??;
+                let acp_config_diagnostic = negotiate_acp_config(
+                    &connection,
+                    &session_response.session_id,
+                    session_response.config_options.clone().unwrap_or_default(),
+                    session_response.modes.clone(),
+                    &req.acp_config,
+                    idle_timeout,
+                )
+                .await?;
+                let mut session = connection.attach_session(session_response, Vec::new())?;
 
-                        let user_message_count = user_messages.len();
-                        for (message_index, user_message) in user_messages.into_iter().enumerate() {
-                            if out.turns_used >= max_turns {
-                                out.stopped_reason = "max_turns".to_string();
-                                break;
-                            }
+                let mut out = RuntimeRunResult::new(max_turns, max_turns_user_set);
+                out.cost = TraceCost {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    usd_estimate: 0.0,
+                    source: "acp".to_string(),
+                };
+                out.session_id = Some(session.session_id().to_string());
+                if let Some(diagnostic) = mcp_diagnostic {
+                    out.diagnostics.push(diagnostic);
+                }
+                if let Some(diagnostic) = acp_config_diagnostic {
+                    out.diagnostics.push(diagnostic);
+                }
+                client_bridge.set_session_id(session.session_id().to_string());
+                let mut progress = req.progress.then(AcpProgress::new);
 
-                            let turn_index = out.turns.len();
-                            out.turns.push(Turn {
-                                index: turn_index,
-                                role: "assistant".to_string(),
-                                text_deltas: Vec::new(),
-                                tool_calls: Vec::new(),
-                                usage: None,
-                            });
-                            out.turns_used += 1;
+                let user_message_count = user_messages.len();
+                for (message_index, user_message) in user_messages.into_iter().enumerate() {
+                    if out.turns_used >= max_turns {
+                        out.stopped_reason = "max_turns".to_string();
+                        break;
+                    }
 
-                            session.send_prompt(user_message)?;
-                            loop {
-                                let message =
-                                    tokio::time::timeout(idle_timeout, session.read_update())
-                                        .await
-                                        .map_err(|_| {
-                                            acp_timeout_error("session update", idle_timeout)
-                                        })??;
-                                match message {
-                                    SessionMessage::SessionMessage(dispatch) => {
-                                        MatchDispatch::new(dispatch)
-                                            .if_notification(
-                                                async |notification: SessionNotification| {
-                                                    if let Some(progress) = &mut progress {
-                                                        progress.print_update(&notification.update);
-                                                    }
-                                                    apply_session_update(
-                                                        notification.update,
-                                                        &mut out,
-                                                    );
-                                                    flush_bridge_tool_calls(
-                                                        &client_bridge,
-                                                        &mut out,
-                                                    );
-                                                    Ok(())
-                                                },
-                                            )
-                                            .await
-                                            .otherwise_ignore()?;
-                                    }
-                                    SessionMessage::StopReason(reason) => {
-                                        out.stopped_reason = stop_reason_to_string(reason);
-                                        flush_bridge_tool_calls(&client_bridge, &mut out);
+                    let turn_index = out.turns.len();
+                    out.turns.push(Turn {
+                        index: turn_index,
+                        role: "assistant".to_string(),
+                        text_deltas: Vec::new(),
+                        tool_calls: Vec::new(),
+                        usage: None,
+                    });
+                    out.turns_used += 1;
+
+                    session.send_prompt(user_message)?;
+                    loop {
+                        let message = tokio::time::timeout(idle_timeout, session.read_update())
+                            .await
+                            .map_err(|_| acp_timeout_error("session update", idle_timeout))??;
+                        match message {
+                            SessionMessage::SessionMessage(dispatch) => {
+                                MatchDispatch::new(dispatch)
+                                    .if_notification(async |notification: SessionNotification| {
                                         if let Some(progress) = &mut progress {
-                                            progress.stop_reason(&out.stopped_reason);
+                                            progress.print_update(&notification.update);
                                         }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
+                                        apply_session_update(notification.update, &mut out);
+                                        flush_bridge_tool_calls(&client_bridge, &mut out);
+                                        Ok(())
+                                    })
+                                    .await
+                                    .otherwise_ignore()?;
                             }
-
-                            if out.turns_used >= max_turns && message_index + 1 < user_message_count
-                            {
-                                out.stopped_reason = "max_turns".to_string();
+                            SessionMessage::StopReason(reason) => {
+                                out.stopped_reason = stop_reason_to_string(reason);
+                                flush_bridge_tool_calls(&client_bridge, &mut out);
+                                if let Some(progress) = &mut progress {
+                                    progress.stop_reason(&out.stopped_reason);
+                                }
                                 break;
                             }
+                            _ => {}
                         }
+                    }
 
-                        let close_request = session
-                            .connection()
-                            .send_request_to(
-                                Agent,
-                                CloseSessionRequest::new(session.session_id().clone()),
-                            )
-                            .block_task();
-                        let _ = tokio::time::timeout(idle_timeout, close_request).await;
-                        flush_bridge_tool_calls(&client_bridge, &mut out);
+                    if out.turns_used >= max_turns && message_index + 1 < user_message_count {
+                        out.stopped_reason = "max_turns".to_string();
+                        break;
+                    }
+                }
 
-                        if out.stopped_reason == "other" && out.errors.is_empty() {
-                            out.stopped_reason = "end_turn".to_string();
-                        }
-                        if let Some(mut progress) = progress {
-                            progress.finish();
-                        }
-                        Ok(out)
-                    })
-                    .await
+                let close_request = session
+                    .connection()
+                    .send_request_to(
+                        Agent,
+                        CloseSessionRequest::new(session.session_id().clone()),
+                    )
+                    .block_task();
+                let _ = tokio::time::timeout(idle_timeout, close_request).await;
+                flush_bridge_tool_calls(&client_bridge, &mut out);
+
+                if out.stopped_reason == "other" && out.errors.is_empty() {
+                    out.stopped_reason = "end_turn".to_string();
+                }
+                if let Some(mut progress) = progress {
+                    progress.finish();
+                }
+                Ok(out)
             },
         )
         .await
@@ -298,6 +305,547 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         result.diagnostics.extend(diagnostics.iter().cloned());
     }
     Ok(result)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpConfigTarget {
+    Mode,
+    Model,
+    Reasoning,
+}
+
+impl AcpConfigTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mode => "mode",
+            Self::Model => "model",
+            Self::Reasoning => "reasoning",
+        }
+    }
+
+    fn category(self) -> SessionConfigOptionCategory {
+        match self {
+            Self::Mode => SessionConfigOptionCategory::Mode,
+            Self::Model => SessionConfigOptionCategory::Model,
+            Self::Reasoning => SessionConfigOptionCategory::ThoughtLevel,
+        }
+    }
+
+    fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::Mode => &["mode"],
+            Self::Model => &["model"],
+            Self::Reasoning => &["reasoning", "reason", "thought", "thought_level"],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AcpConfigSelection {
+    config_id: SessionConfigId,
+    value_id: SessionConfigValueId,
+    current_value_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcpConfigSelectionErrorKind {
+    NoOption,
+    UnsupportedValue,
+    AmbiguousOption,
+}
+
+#[derive(Debug, Clone)]
+struct AcpConfigSelectionError {
+    kind: AcpConfigSelectionErrorKind,
+    message: String,
+}
+
+impl std::fmt::Display for AcpConfigSelectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AcpConfigSelectionError {}
+
+#[derive(Debug, Clone)]
+struct AcpAppliedConfig {
+    target: AcpConfigTarget,
+    requested: String,
+    applied: Option<String>,
+    status: String,
+    method: Option<&'static str>,
+    config_id: Option<String>,
+    mode_id: Option<String>,
+}
+
+async fn negotiate_acp_config(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::SessionId,
+    mut config_options: Vec<SessionConfigOption>,
+    modes: Option<SessionModeState>,
+    request: &super::AcpConfigRequest,
+    idle_timeout: Duration,
+) -> Result<Option<String>, agent_client_protocol::Error> {
+    let mut applied = Vec::new();
+
+    if let Some(requested) = request.mode.as_deref() {
+        let entry = negotiate_acp_mode(
+            connection,
+            session_id,
+            &mut config_options,
+            modes.as_ref(),
+            requested,
+            idle_timeout,
+        )
+        .await?;
+        applied.push(entry);
+    }
+
+    if let Some(requested) = request.model.as_deref() {
+        let entry = negotiate_acp_config_option(
+            connection,
+            session_id,
+            &mut config_options,
+            AcpConfigTarget::Model,
+            requested,
+            idle_timeout,
+        )
+        .await?;
+        applied.push(entry);
+    }
+
+    if let Some(requested) = request.reasoning.as_deref() {
+        let entry = negotiate_acp_config_option(
+            connection,
+            session_id,
+            &mut config_options,
+            AcpConfigTarget::Reasoning,
+            requested,
+            idle_timeout,
+        )
+        .await?;
+        applied.push(entry);
+    }
+
+    Ok(acp_effective_config_diagnostic(&applied))
+}
+
+async fn negotiate_acp_mode(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::SessionId,
+    config_options: &mut Vec<SessionConfigOption>,
+    modes: Option<&SessionModeState>,
+    requested: &str,
+    idle_timeout: Duration,
+) -> Result<AcpAppliedConfig, agent_client_protocol::Error> {
+    match resolve_acp_config_selection(config_options, AcpConfigTarget::Mode, requested) {
+        Ok(selection) => {
+            apply_acp_config_selection(
+                connection,
+                session_id,
+                config_options,
+                AcpConfigTarget::Mode,
+                requested,
+                selection,
+                idle_timeout,
+            )
+            .await
+        }
+        Err(config_err)
+            if matches!(
+                config_err.kind,
+                AcpConfigSelectionErrorKind::NoOption
+                    | AcpConfigSelectionErrorKind::UnsupportedValue
+            ) =>
+        {
+            if let Some(modes) = modes {
+                match resolve_acp_session_mode(modes, requested) {
+                    Ok(mode_id) => {
+                        let current_mode_id = modes.current_mode_id.to_string();
+                        if current_mode_id != mode_id.to_string() {
+                            let response = tokio::time::timeout(
+                                idle_timeout,
+                                connection
+                                    .send_request_to(
+                                        Agent,
+                                        SetSessionModeRequest::new(
+                                            session_id.clone(),
+                                            mode_id.clone(),
+                                        ),
+                                    )
+                                    .block_task(),
+                            )
+                            .await
+                            .map_err(|_| acp_timeout_error("session/set_mode", idle_timeout))??;
+                            let _: SetSessionModeResponse = response;
+                        }
+                        Ok(AcpAppliedConfig {
+                            target: AcpConfigTarget::Mode,
+                            requested: requested.to_string(),
+                            applied: Some(mode_id.to_string()),
+                            status: if current_mode_id == mode_id.to_string() {
+                                "already_current".to_string()
+                            } else {
+                                "applied".to_string()
+                            },
+                            method: (current_mode_id != mode_id.to_string())
+                                .then_some("session/set_mode"),
+                            config_id: None,
+                            mode_id: Some(mode_id.to_string()),
+                        })
+                    }
+                    Err(mode_err) => Err(acp_invalid_params_error(format!(
+                        "{config_err}; ACP mode fallback also failed: {mode_err}"
+                    ))),
+                }
+            } else {
+                Err(acp_invalid_params_error(config_err))
+            }
+        }
+        Err(config_err) => Err(acp_invalid_params_error(config_err)),
+    }
+}
+
+async fn negotiate_acp_config_option(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::SessionId,
+    config_options: &mut Vec<SessionConfigOption>,
+    target: AcpConfigTarget,
+    requested: &str,
+    idle_timeout: Duration,
+) -> Result<AcpAppliedConfig, agent_client_protocol::Error> {
+    let selection = resolve_acp_config_selection(config_options, target, requested)
+        .map_err(acp_invalid_params_error)?;
+    apply_acp_config_selection(
+        connection,
+        session_id,
+        config_options,
+        target,
+        requested,
+        selection,
+        idle_timeout,
+    )
+    .await
+}
+
+async fn apply_acp_config_selection(
+    connection: &ConnectionTo<Agent>,
+    session_id: &agent_client_protocol::schema::SessionId,
+    config_options: &mut Vec<SessionConfigOption>,
+    target: AcpConfigTarget,
+    requested: &str,
+    selection: AcpConfigSelection,
+    idle_timeout: Duration,
+) -> Result<AcpAppliedConfig, agent_client_protocol::Error> {
+    let config_id = selection.config_id.to_string();
+    let value_id = selection.value_id.to_string();
+    let is_current = selection.current_value_id == value_id;
+    if !is_current {
+        let response: SetSessionConfigOptionResponse = tokio::time::timeout(
+            idle_timeout,
+            connection
+                .send_request_to(
+                    Agent,
+                    SetSessionConfigOptionRequest::new(
+                        session_id.clone(),
+                        selection.config_id,
+                        selection.value_id,
+                    ),
+                )
+                .block_task(),
+        )
+        .await
+        .map_err(|_| acp_timeout_error("session/set_config_option", idle_timeout))??;
+        *config_options = response.config_options;
+    }
+
+    Ok(AcpAppliedConfig {
+        target,
+        requested: requested.to_string(),
+        applied: Some(value_id),
+        status: if is_current {
+            "already_current".to_string()
+        } else {
+            "applied".to_string()
+        },
+        method: (!is_current).then_some("session/set_config_option"),
+        config_id: Some(config_id),
+        mode_id: None,
+    })
+}
+
+fn resolve_acp_config_selection(
+    config_options: &[SessionConfigOption],
+    target: AcpConfigTarget,
+    requested: &str,
+) -> Result<AcpConfigSelection, AcpConfigSelectionError> {
+    let category_candidates = config_options
+        .iter()
+        .filter(|option| option.category.as_ref() == Some(&target.category()))
+        .filter(|option| select_payload(option).is_some())
+        .collect::<Vec<_>>();
+
+    if !category_candidates.is_empty() {
+        return select_single_config_candidate(target, requested, category_candidates, false);
+    }
+
+    let fallback_candidates = config_options
+        .iter()
+        .filter(|option| select_payload(option).is_some())
+        .filter(|option| config_option_matches_alias(option, target))
+        .collect::<Vec<_>>();
+    select_single_config_candidate(target, requested, fallback_candidates, true)
+}
+
+fn select_single_config_candidate(
+    target: AcpConfigTarget,
+    requested: &str,
+    candidates: Vec<&SessionConfigOption>,
+    from_fallback: bool,
+) -> Result<AcpConfigSelection, AcpConfigSelectionError> {
+    match candidates.as_slice() {
+        [] => Err(AcpConfigSelectionError {
+            kind: AcpConfigSelectionErrorKind::NoOption,
+            message: format!("ACP agent does not expose {} selection", target.label()),
+        }),
+        [option] => select_config_value(option, target, requested),
+        _ => {
+            let ids = candidates
+                .iter()
+                .map(|option| option.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let source = if from_fallback { " from fallback" } else { "" };
+            Err(AcpConfigSelectionError {
+                kind: AcpConfigSelectionErrorKind::AmbiguousOption,
+                message: format!(
+                    "ambiguous ACP {} config option{source} for `{requested}`: {ids}",
+                    target.label()
+                ),
+            })
+        }
+    }
+}
+
+fn select_config_value(
+    option: &SessionConfigOption,
+    target: AcpConfigTarget,
+    requested: &str,
+) -> Result<AcpConfigSelection, AcpConfigSelectionError> {
+    let select = select_payload(option).expect("candidate is select");
+    let choices = flatten_select_options(select);
+    let selected =
+        find_named_value(&choices, requested).ok_or_else(|| AcpConfigSelectionError {
+            kind: AcpConfigSelectionErrorKind::UnsupportedValue,
+            message: format!(
+                "unsupported ACP {} `{requested}`; supported values: {}",
+                target.label(),
+                supported_config_values(&choices)
+            ),
+        })?;
+
+    Ok(AcpConfigSelection {
+        config_id: option.id.clone(),
+        value_id: selected.value.clone(),
+        current_value_id: select.current_value.to_string(),
+    })
+}
+
+fn resolve_acp_session_mode(
+    modes: &SessionModeState,
+    requested: &str,
+) -> Result<SessionModeId, AcpConfigSelectionError> {
+    let options = modes
+        .available_modes
+        .iter()
+        .map(|mode| NamedValue {
+            value: mode.id.to_string(),
+            name: mode.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    find_named_value_ref(&options, requested)
+        .map(|matched| SessionModeId::new(matched.value.clone()))
+        .ok_or_else(|| AcpConfigSelectionError {
+            kind: AcpConfigSelectionErrorKind::UnsupportedValue,
+            message: format!(
+                "unsupported ACP mode `{requested}`; supported values: {}",
+                supported_named_values(&options)
+            ),
+        })
+}
+
+fn select_payload(option: &SessionConfigOption) -> Option<&SessionConfigSelect> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => Some(select),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
+fn flatten_select_options(select: &SessionConfigSelect) -> Vec<NamedConfigValue<'_>> {
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(NamedConfigValue::from_select_option)
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .map(NamedConfigValue::from_select_option)
+            .collect(),
+        #[allow(unreachable_patterns)]
+        _ => Vec::new(),
+    }
+}
+
+#[derive(Clone)]
+struct NamedConfigValue<'a> {
+    value: &'a SessionConfigValueId,
+    value_text: String,
+    name: &'a str,
+}
+
+impl<'a> NamedConfigValue<'a> {
+    fn from_select_option(option: &'a SessionConfigSelectOption) -> Self {
+        Self {
+            value: &option.value,
+            value_text: option.value.to_string(),
+            name: &option.name,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NamedValue {
+    value: String,
+    name: String,
+}
+
+fn find_named_value<'a>(
+    choices: &'a [NamedConfigValue<'a>],
+    requested: &str,
+) -> Option<&'a NamedConfigValue<'a>> {
+    choices
+        .iter()
+        .find(|choice| choice.value_text == requested)
+        .or_else(|| choices.iter().find(|choice| choice.name == requested))
+        .or_else(|| {
+            choices
+                .iter()
+                .find(|choice| choice.value_text.eq_ignore_ascii_case(requested))
+        })
+        .or_else(|| {
+            choices
+                .iter()
+                .find(|choice| choice.name.eq_ignore_ascii_case(requested))
+        })
+}
+
+fn find_named_value_ref<'a>(choices: &'a [NamedValue], requested: &str) -> Option<&'a NamedValue> {
+    choices
+        .iter()
+        .find(|choice| choice.value == requested)
+        .or_else(|| choices.iter().find(|choice| choice.name == requested))
+        .or_else(|| {
+            choices
+                .iter()
+                .find(|choice| choice.value.eq_ignore_ascii_case(requested))
+        })
+        .or_else(|| {
+            choices
+                .iter()
+                .find(|choice| choice.name.eq_ignore_ascii_case(requested))
+        })
+}
+
+fn supported_config_values(choices: &[NamedConfigValue<'_>]) -> String {
+    let values = choices
+        .iter()
+        .map(|choice| format!("{} ({})", choice.value_text, choice.name))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "<none>".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn supported_named_values(choices: &[NamedValue]) -> String {
+    let values = choices
+        .iter()
+        .map(|choice| format!("{} ({})", choice.value, choice.name))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        "<none>".to_string()
+    } else {
+        values.join(", ")
+    }
+}
+
+fn config_option_matches_alias(option: &SessionConfigOption, target: AcpConfigTarget) -> bool {
+    let labels = [option.id.to_string(), option.name.clone()];
+    labels
+        .iter()
+        .any(|label| label_matches_alias(label, target.aliases()))
+}
+
+fn label_matches_alias(label: &str, aliases: &[&str]) -> bool {
+    let tokens = label_tokens(label);
+    let compact = label
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+    aliases.iter().any(|alias| {
+        let alias_compact = alias.replace('_', "");
+        tokens.iter().any(|token| token == alias)
+            || compact == alias_compact
+            || compact.contains(&format!("{alias_compact}selector"))
+    })
+}
+
+fn label_tokens(label: &str) -> Vec<String> {
+    label
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
+fn acp_effective_config_diagnostic(applied: &[AcpAppliedConfig]) -> Option<String> {
+    if applied.is_empty() {
+        return None;
+    }
+    let mut root = Map::new();
+    for entry in applied {
+        let mut value = Map::new();
+        value.insert(
+            "requested".to_string(),
+            Value::String(entry.requested.clone()),
+        );
+        value.insert("status".to_string(), Value::String(entry.status.clone()));
+        if let Some(applied) = &entry.applied {
+            value.insert("applied".to_string(), Value::String(applied.clone()));
+        }
+        if let Some(method) = entry.method {
+            value.insert("method".to_string(), Value::String(method.to_string()));
+        }
+        if let Some(config_id) = &entry.config_id {
+            value.insert("configId".to_string(), Value::String(config_id.clone()));
+        }
+        if let Some(mode_id) = &entry.mode_id {
+            value.insert("modeId".to_string(), Value::String(mode_id.clone()));
+        }
+        root.insert(entry.target.label().to_string(), Value::Object(value));
+    }
+    serde_json::to_string(&Value::Object(root))
+        .ok()
+        .map(|json| format!("ACP effective config: {json}"))
+}
+
+fn acp_invalid_params_error(message: impl std::fmt::Display) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::new(-32602, message.to_string())
 }
 
 struct AcpProgress {
@@ -1025,7 +1573,9 @@ impl Drop for CurrentDirGuard {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::{
-        McpCapabilities, PermissionOption, PermissionOptionKind, ToolCallId, ToolCallUpdateFields,
+        McpCapabilities, PermissionOption, PermissionOptionKind, SessionConfigOption,
+        SessionConfigOptionCategory, SessionConfigSelectOption, SessionMode, SessionModeState,
+        ToolCallId, ToolCallUpdateFields,
     };
 
     use super::*;
@@ -1046,6 +1596,102 @@ mod tests {
                 PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
             ],
         )
+    }
+
+    fn select_option(
+        id: &str,
+        name: &str,
+        category: Option<SessionConfigOptionCategory>,
+        current: &str,
+        options: &[(&str, &str)],
+    ) -> SessionConfigOption {
+        let select_options = options
+            .iter()
+            .map(|(value, name)| {
+                SessionConfigSelectOption::new((*value).to_string(), (*name).to_string())
+            })
+            .collect::<Vec<_>>();
+        let mut option = SessionConfigOption::select(
+            id.to_string(),
+            name.to_string(),
+            current.to_string(),
+            select_options,
+        );
+        if let Some(category) = category {
+            option = option.category(category);
+        }
+        option
+    }
+
+    #[test]
+    fn acp_config_selection_matches_category_and_display_name() {
+        let options = vec![select_option(
+            "model_selector",
+            "Model",
+            Some(SessionConfigOptionCategory::Model),
+            "sonnet",
+            &[("gpt-5-codex", "GPT 5 Codex"), ("sonnet", "Claude Sonnet")],
+        )];
+
+        let selection =
+            resolve_acp_config_selection(&options, AcpConfigTarget::Model, "gpt 5 codex")
+                .expect("model selected by display name");
+
+        assert_eq!(selection.config_id.to_string(), "model_selector");
+        assert_eq!(selection.value_id.to_string(), "gpt-5-codex");
+    }
+
+    #[test]
+    fn acp_config_selection_uses_fallback_id_and_rejects_unsupported_value() {
+        let options = vec![select_option(
+            "reasoning",
+            "Reasoning",
+            None,
+            "medium",
+            &[("low", "Low"), ("medium", "Medium"), ("high", "High")],
+        )];
+
+        let err = resolve_acp_config_selection(&options, AcpConfigTarget::Reasoning, "xhigh")
+            .expect_err("unsupported reasoning rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("unsupported ACP reasoning `xhigh`"));
+        assert!(message.contains("low"));
+        assert!(message.contains("high"));
+    }
+
+    #[test]
+    fn acp_config_selection_rejects_ambiguous_fallback_options() {
+        let options = vec![
+            select_option("mode", "Mode", None, "default", &[("plan", "Plan")]),
+            select_option(
+                "agent_mode",
+                "Agent Mode",
+                None,
+                "default",
+                &[("plan", "Plan")],
+            ),
+        ];
+
+        let err = resolve_acp_config_selection(&options, AcpConfigTarget::Mode, "plan")
+            .expect_err("ambiguous fallback rejected");
+
+        assert!(err.to_string().contains("ambiguous ACP mode config option"));
+    }
+
+    #[test]
+    fn acp_mode_selection_falls_back_to_session_modes() {
+        let modes = SessionModeState::new(
+            "default",
+            vec![
+                SessionMode::new("default", "Default"),
+                SessionMode::new("plan", "Plan"),
+            ],
+        );
+
+        let mode_id = resolve_acp_session_mode(&modes, "plan").expect("mode selected");
+
+        assert_eq!(mode_id.to_string(), "plan");
     }
 
     #[test]

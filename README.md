@@ -98,6 +98,8 @@ defaults:
   # Optional for ACP:
   # runtime: acp
   # agent: gemini
+  # mode: plan
+  # reasoning: high
 
 # Optional ACP agent registry:
 # acp_agents:
@@ -150,6 +152,7 @@ ai-tester run <skill>
 ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --model gpt-5-codex --mode plan --reasoning high
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
 ai-tester run --dir ./prompts --runtime codex
 
@@ -276,6 +279,9 @@ ACP scenarios select a configured agent by name:
 runner:
   runtime: acp
   agent: gemini
+  model: gpt-5-codex
+  mode: plan
+  reasoning: high
   permission_mode: bypassPermissions
 ```
 
@@ -512,7 +518,9 @@ mcp_profiles:
     servers: [codegraph, docs]
 ```
 
-Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. `defaults.mcp_profile`, scenario `runner.mcp_profile`, or `ai-tester run --mcp-profile <name>` chooses a profile from `mcp_profiles`; CLI has highest precedence. Scenario-level `mcp_servers` may override or add servers for a single run. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, forwards the effective MCP servers in `session/new.mcpServers`, then sends each scripted user prompt through that session. `runner.model` is not sent over ACP in this MVP; pass model or mode flags through the configured `args`.
+Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. `defaults.mcp_profile`, scenario `runner.mcp_profile`, or `ai-tester run --mcp-profile <name>` chooses a profile from `mcp_profiles`; CLI has highest precedence. Scenario-level `mcp_servers` may override or add servers for a single run. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, forwards the effective MCP servers in `session/new.mcpServers`, applies requested ACP model/mode/reasoning config when the agent exposes compatible session options, then sends each scripted user prompt through that session.
+
+ACP model/mode negotiation uses `runner.model`, `runner.mode`, and `runner.reasoning`, with CLI flags `--model`, `--mode`, and `--reasoning` taking precedence. `runner.mode` is an ACP session mode/config selector and is separate from `permission_mode`. Explicit values from CLI, scenario YAML, or project defaults fail fast when the agent does not expose a matching option or value; the built-in model default is not forced onto ACP agents that do not advertise model selection. Successful ACP traces include an `ACP effective config` diagnostic with the applied model/mode/reasoning.
 
 Supported MCP transports are stdio (default when `type` is omitted), `http`, and `sse`. Stdio servers use `command`, optional `args`, and optional `env`; HTTP/SSE servers use `url` and optional `headers`. Env and header values are redacted in ai-tester trace diagnostics.
 
@@ -571,7 +579,7 @@ Trace records include:
 
 - skill metadata and source hashes
 - scenario metadata
-- runner timing, model, permission mode, max turns, and sandbox path
+- runner timing, model, optional ACP mode/reasoning, permission mode, max turns, and sandbox path
 - normalized turns and tool calls
 - final output
 - assertion results and weighted score

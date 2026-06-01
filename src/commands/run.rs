@@ -32,6 +32,8 @@ pub struct RunOptions {
     pub file: Option<PathBuf>,
     pub dir: Option<PathBuf>,
     pub model: Option<String>,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     pub runtime: Option<String>,
     pub agent: Option<String>,
     pub mcp_profile: Option<String>,
@@ -185,6 +187,11 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         } else {
             Vec::new()
         };
+        let acp_config = if runtime_name == "acp" {
+            build_acp_config_request(&loaded, &opts, &config, &scenario)
+        } else {
+            crate::runtime::AcpConfigRequest::default()
+        };
 
         if !silent {
             print_scenario_start(idx + 1, total, &loaded, &scenario, &skill);
@@ -242,6 +249,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
             mcp_servers,
+            acp_config,
         }) {
             Ok(result) => result,
             Err(err) => {
@@ -581,6 +589,16 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
             scenario.runner.model = model;
         }
     }
+    if !loaded.source_meta.runner_mode_set {
+        if let Some(mode) = config.defaults.mode {
+            scenario.runner.mode = Some(mode);
+        }
+    }
+    if !loaded.source_meta.runner_reasoning_set {
+        if let Some(reasoning) = config.defaults.reasoning {
+            scenario.runner.reasoning = Some(reasoning);
+        }
+    }
     if !loaded.source_meta.runner_permission_mode_set {
         if let Some(permission_mode) = config.defaults.permission_mode {
             scenario.runner.permission_mode = permission_mode;
@@ -588,6 +606,12 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
     }
     if let Some(model) = opts.model.clone() {
         scenario.runner.model = model;
+    }
+    if let Some(mode) = opts.mode.clone() {
+        scenario.runner.mode = Some(mode);
+    }
+    if let Some(reasoning) = opts.reasoning.clone() {
+        scenario.runner.reasoning = Some(reasoning);
     }
     if let Some(runtime) = opts.runtime.clone() {
         scenario.runner.runtime = runtime;
@@ -609,6 +633,32 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
         scenario.runner.mcp_profile = Some(mcp_profile);
     }
     Ok(scenario)
+}
+
+fn build_acp_config_request(
+    loaded: &LoadedScenario,
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> crate::runtime::AcpConfigRequest {
+    let model_requested = opts.model.is_some()
+        || loaded.source_meta.runner_model_set
+        || config.defaults.model.is_some();
+    let mode_requested =
+        opts.mode.is_some() || loaded.source_meta.runner_mode_set || config.defaults.mode.is_some();
+    let reasoning_requested = opts.reasoning.is_some()
+        || loaded.source_meta.runner_reasoning_set
+        || config.defaults.reasoning.is_some();
+
+    crate::runtime::AcpConfigRequest {
+        model: model_requested.then(|| scenario.runner.model.clone()),
+        mode: mode_requested
+            .then(|| scenario.runner.mode.clone())
+            .flatten(),
+        reasoning: reasoning_requested
+            .then(|| scenario.runner.reasoning.clone())
+            .flatten(),
+    }
 }
 
 fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
@@ -964,6 +1014,8 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
         runner: TraceRunner {
             runtime: scenario.runner.runtime.clone(),
             model: scenario.runner.model.clone(),
+            mode: scenario.runner.mode.clone(),
+            reasoning: scenario.runner.reasoning.clone(),
             permission_mode: scenario.runner.permission_mode.clone(),
             started_at,
             finished_at,
