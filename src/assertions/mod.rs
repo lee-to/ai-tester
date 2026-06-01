@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::scenario::AssertionSpec;
 use crate::trace::{ToolCallRecord, TraceRecord};
+use crate::util::path as path_util;
 use crate::util::regex::compile_pattern;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -284,6 +285,11 @@ fn file_read_call_matches(call: &ToolCallRecord, path_re: &regex::Regex) -> bool
             .get("command")
             .map(value_to_string)
             .is_some_and(|command| bash_command_reads_path(&command, path_re)),
+        "fs/read_text_file" => call
+            .input
+            .get("path")
+            .map(value_to_string)
+            .is_some_and(|path| path_re.is_match(&path)),
         _ => false,
     }
 }
@@ -314,13 +320,14 @@ fn evaluate_no_path_escape(
         );
     };
 
-    let sandbox = normalize_path_lexical(Path::new(sandbox_path));
+    let sandbox = path_util::canonicalize_existing(Path::new(sandbox_path))
+        .unwrap_or_else(|_| path_util::normalize_path_lexical(Path::new(sandbox_path)));
     let mut allowed_roots = vec![sandbox.clone()];
     if let Some(extra_roots) = allow_outside {
         allowed_roots.extend(
             extra_roots
                 .iter()
-                .map(|path| resolve_against_sandbox(&sandbox, path)),
+                .map(|path| resolve_allowed_root(&sandbox, path)),
         );
     }
 
@@ -330,12 +337,16 @@ fn evaluate_no_path_escape(
             continue;
         }
         for (field, raw_path) in tool_path_inputs(call) {
-            let resolved = resolve_against_sandbox(&sandbox, &raw_path);
-            if !allowed_roots
-                .iter()
-                .any(|root| path_is_within(&resolved, root))
-            {
-                violations.push(format!("{}.{field} -> {raw_path}", call.name));
+            match resolve_trace_path(&sandbox, &call.name, &raw_path) {
+                Ok(resolved) => {
+                    if !allowed_roots
+                        .iter()
+                        .any(|root| path_util::path_is_within(&resolved, root))
+                    {
+                        violations.push(format!("{}.{field} -> {raw_path}", call.name));
+                    }
+                }
+                Err(err) => violations.push(format!("{}.{field} -> {raw_path} ({err})", call.name)),
             }
         }
     }
@@ -493,17 +504,48 @@ fn tool_path_fields(tool: &str) -> &'static [&'static str] {
     match tool {
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookRead" | "NotebookEdit" => &["file_path"],
         "Glob" | "Grep" | "LS" => &["path"],
+        "fs/read_text_file" | "fs/write_text_file" => &["path"],
+        "terminal/create" => &["cwd"],
         _ => &[],
     }
 }
 
-fn resolve_against_sandbox(sandbox: &Path, raw_path: &str) -> PathBuf {
+fn resolve_allowed_root(sandbox: &Path, raw_path: &str) -> PathBuf {
+    let expanded = expand_home(raw_path);
+    let candidate = path_util::candidate_path(sandbox, Path::new(&expanded));
+    path_util::canonicalize_existing(&candidate)
+        .unwrap_or_else(|_| path_util::normalize_path_lexical(&candidate))
+}
+
+fn resolve_trace_path(sandbox: &Path, tool: &str, raw_path: &str) -> anyhow::Result<PathBuf> {
     let expanded = expand_home(raw_path);
     let path = Path::new(&expanded);
-    if path.is_absolute() {
-        normalize_path_lexical(path)
-    } else {
-        normalize_path_lexical(&sandbox.join(path))
+    match tool {
+        "fs/write_text_file" => {
+            path_util::resolve_write_target_inside(sandbox, path).or_else(|err| {
+                if err.to_string().contains("escapes sandbox") {
+                    Err(err)
+                } else {
+                    Ok(path_util::normalize_path_lexical(
+                        &path_util::candidate_path(sandbox, path),
+                    ))
+                }
+            })
+        }
+        "fs/read_text_file" => path_util::resolve_existing_inside(sandbox, path).or_else(|err| {
+            if err.to_string().contains("escapes sandbox") {
+                Err(err)
+            } else {
+                Ok(path_util::normalize_path_lexical(
+                    &path_util::candidate_path(sandbox, path),
+                ))
+            }
+        }),
+        _ => {
+            let candidate = path_util::candidate_path(sandbox, path);
+            Ok(path_util::canonicalize_existing(&candidate)
+                .unwrap_or_else(|_| path_util::normalize_path_lexical(&candidate)))
+        }
     }
 }
 
@@ -521,47 +563,6 @@ fn home_dir_string() -> Option<String> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|value| value.to_string_lossy().to_string())
-}
-
-fn normalize_path_lexical(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push("..");
-                }
-            }
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn path_is_within(path: &Path, root: &Path) -> bool {
-    let path_components = path_component_keys(path);
-    let root_components = path_component_keys(root);
-    path_components.len() >= root_components.len()
-        && path_components
-            .iter()
-            .zip(root_components.iter())
-            .all(|(path, root)| path == root)
-}
-
-fn path_component_keys(path: &Path) -> Vec<String> {
-    path.components()
-        .map(|component| {
-            let text = component.as_os_str().to_string_lossy().to_string();
-            if cfg!(windows) {
-                text.to_ascii_lowercase()
-            } else {
-                text
-            }
-        })
-        .collect()
 }
 
 fn base_result(id: &str, kind: &str, pass: bool, weight: f64, detail: String) -> AssertionResult {

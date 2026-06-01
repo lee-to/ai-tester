@@ -4,10 +4,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    CloseSessionRequest, ContentBlock, InitializeRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionNotification, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    ClientCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
+    FileSystemCapabilities, InitializeRequest, KillTerminalRequest, ProtocolVersion,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionNotification, SessionUpdate, StopReason, TerminalOutputRequest, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
+    WriteTextFileRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
 use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, SessionMessage};
@@ -21,6 +24,10 @@ use crate::ui::{self, Tone};
 use crate::util::regex::compile_pattern;
 
 use super::{RuntimeRunRequest, RuntimeRunResult};
+
+mod client_capabilities;
+
+use client_capabilities::AcpClientBridge;
 
 pub fn run_acp(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -48,6 +55,10 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let session_cwd = acp_session_cwd(&process_cwd);
     let user_messages = build_acp_user_messages(&req);
     let idle_timeout = Duration::from_secs(req.idle_warn_seconds.max(1));
+    let client_bridge = Arc::new(AcpClientBridge::new(
+        process_cwd.clone(),
+        terminal_wait_timeout(idle_timeout),
+    )?);
     let policy = Arc::new(PermissionPolicy::from_runner(
         &req.scenario.runner,
         &req.allowed_tools,
@@ -56,6 +67,14 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let permission_diagnostics = Arc::new(Mutex::new(Vec::<String>::new()));
     let permission_diagnostics_for_handler = Arc::clone(&permission_diagnostics);
     let policy_for_handler = Arc::clone(&policy);
+    let bridge_for_read = Arc::clone(&client_bridge);
+    let bridge_for_write = Arc::clone(&client_bridge);
+    let bridge_for_terminal_create = Arc::clone(&client_bridge);
+    let bridge_for_terminal_output = Arc::clone(&client_bridge);
+    let bridge_for_terminal_wait = Arc::clone(&client_bridge);
+    let bridge_for_terminal_kill = Arc::clone(&client_bridge);
+    let bridge_for_terminal_release = Arc::clone(&client_bridge);
+    let bridge_for_connection = Arc::clone(&client_bridge);
 
     let _cwd_guard = CurrentDirGuard::push(&process_cwd)?;
     let mut result = Client
@@ -71,13 +90,83 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             },
             agent_client_protocol::on_receive_request!(),
         )
+        .on_receive_request(
+            async move |request: ReadTextFileRequest, responder, _connection| match bridge_for_read
+                .handle_read_text_file(request)
+            {
+                Ok(response) => responder.respond(response),
+                Err(err) => responder.respond_with_error(err),
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WriteTextFileRequest, responder, _connection| {
+                match bridge_for_write.handle_write_text_file(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: CreateTerminalRequest, responder, _connection| {
+                match bridge_for_terminal_create.handle_create_terminal(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: TerminalOutputRequest, responder, _connection| {
+                match bridge_for_terminal_output.handle_terminal_output(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: WaitForTerminalExitRequest, responder, _connection| {
+                match bridge_for_terminal_wait
+                    .handle_wait_for_terminal_exit(request)
+                    .await
+                {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: KillTerminalRequest, responder, _connection| {
+                match bridge_for_terminal_kill.handle_kill_terminal(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: ReleaseTerminalRequest, responder, _connection| {
+                match bridge_for_terminal_release.handle_release_terminal(request) {
+                    Ok(response) => responder.respond(response),
+                    Err(err) => responder.respond_with_error(err),
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
         .connect_with(
             acp_agent,
             move |connection: ConnectionTo<Agent>| async move {
+                let client_bridge = Arc::clone(&bridge_for_connection);
                 tokio::time::timeout(
                     idle_timeout,
                     connection
-                        .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                        .send_request(
+                            InitializeRequest::new(ProtocolVersion::V1)
+                                .client_capabilities(acp_client_capabilities()),
+                        )
                         .block_task(),
                 )
                 .await
@@ -97,6 +186,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                             source: "acp".to_string(),
                         };
                         out.session_id = Some(session.session_id().to_string());
+                        client_bridge.set_session_id(session.session_id().to_string());
                         let mut progress = req.progress.then(AcpProgress::new);
 
                         let user_message_count = user_messages.len();
@@ -136,6 +226,10 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                                                         notification.update,
                                                         &mut out,
                                                     );
+                                                    flush_bridge_tool_calls(
+                                                        &client_bridge,
+                                                        &mut out,
+                                                    );
                                                     Ok(())
                                                 },
                                             )
@@ -144,6 +238,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                                     }
                                     SessionMessage::StopReason(reason) => {
                                         out.stopped_reason = stop_reason_to_string(reason);
+                                        flush_bridge_tool_calls(&client_bridge, &mut out);
                                         if let Some(progress) = &mut progress {
                                             progress.stop_reason(&out.stopped_reason);
                                         }
@@ -168,6 +263,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                             )
                             .block_task();
                         let _ = tokio::time::timeout(idle_timeout, close_request).await;
+                        flush_bridge_tool_calls(&client_bridge, &mut out);
 
                         if out.stopped_reason == "other" && out.errors.is_empty() {
                             out.stopped_reason = "end_turn".to_string();
@@ -296,17 +392,34 @@ impl AcpProgress {
 }
 
 fn acp_session_cwd(cwd: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let cwd = cwd.to_string_lossy();
-        if let Some(rest) = cwd.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = cwd.strip_prefix(r"\\?\") {
-            return PathBuf::from(rest);
-        }
+    crate::util::path::strip_windows_verbatim_prefix(cwd)
+}
+
+fn acp_client_capabilities() -> ClientCapabilities {
+    ClientCapabilities::new()
+        .fs(FileSystemCapabilities::new()
+            .read_text_file(true)
+            .write_text_file(true))
+        .terminal(true)
+}
+
+fn terminal_wait_timeout(idle_timeout: Duration) -> Duration {
+    let cushion = (idle_timeout / 2)
+        .max(Duration::from_millis(500))
+        .min(Duration::from_secs(5));
+    if idle_timeout > cushion {
+        idle_timeout - cushion
+    } else {
+        idle_timeout
     }
-    cwd.to_path_buf()
+}
+
+fn flush_bridge_tool_calls(bridge: &AcpClientBridge, out: &mut RuntimeRunResult) {
+    let calls = bridge.drain_tool_calls();
+    if calls.is_empty() {
+        return;
+    }
+    current_turn_mut(out).tool_calls.extend(calls);
 }
 
 fn acp_timeout_error(stage: &str, idle_timeout: Duration) -> agent_client_protocol::Error {

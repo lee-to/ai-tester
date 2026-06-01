@@ -8,7 +8,12 @@ use ai_tester::scenario::{load_scenario_file, AssertionSpec, Scenario, UserRespo
 use ai_tester::skill::allowed_tools::tokenize_allowed_tools;
 use ai_tester::skill::parse_skill_md;
 use ai_tester::trace::{ToolCallRecord, TraceRecord, Turn};
+use ai_tester::util::path::{
+    resolve_existing_inside, resolve_write_target_inside, strip_windows_verbatim_prefix,
+};
 use ai_tester::util::regex::compile_pattern;
+use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
 
 #[test]
@@ -23,6 +28,48 @@ fn scenario_parses_minimal_skill_with_defaults() {
     assert!(scenario.assertions.is_empty());
     assert!(scenario.user_responses.is_empty());
     assert!(!scenario.fixtures.git_init);
+}
+
+#[test]
+fn path_helper_resolves_only_real_paths_inside_sandbox() {
+    let tmp = TempDir::new().expect("temp dir");
+    fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+    fs::write(tmp.path().join("src/lib.rs"), "ok").expect("file written");
+
+    let resolved = resolve_existing_inside(tmp.path(), Path::new("src/../src/lib.rs"))
+        .expect("inside path resolves");
+    assert_eq!(fs::read_to_string(resolved).expect("read resolved"), "ok");
+
+    let write_target = resolve_write_target_inside(tmp.path(), Path::new("new/child.txt"))
+        .expect("new write target resolves");
+    assert!(write_target.ends_with("new/child.txt"));
+
+    let err = resolve_existing_inside(tmp.path(), Path::new("../escape.txt"))
+        .expect_err("parent escape rejected");
+    assert!(err.to_string().contains("escapes sandbox"));
+}
+
+#[cfg(windows)]
+#[test]
+fn path_helper_strips_windows_verbatim_prefix() {
+    assert_eq!(
+        strip_windows_verbatim_prefix(Path::new(r"\\?\C:\tmp\ai-tester")),
+        Path::new(r"C:\tmp\ai-tester")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn path_helper_rejects_write_through_symlink_outside_sandbox() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = TempDir::new().expect("sandbox temp dir");
+    let outside = TempDir::new().expect("outside temp dir");
+    symlink(outside.path(), sandbox.path().join("linked")).expect("symlink created");
+
+    let err = resolve_write_target_inside(sandbox.path(), Path::new("linked/escape.txt"))
+        .expect_err("symlink escape rejected");
+    assert!(err.to_string().contains("escapes sandbox"));
 }
 
 #[test]
@@ -289,6 +336,24 @@ fn file_read_matches_claude_read_and_codex_bash_readers() {
             .any(|result| result.id == "reads-runtime" && result.pass),
         "{codex_results:#?}"
     );
+
+    let acp_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "acp-read-1",
+            "fs/read_text_file",
+            serde_json::json!({"path": "src/runtime/mod.rs"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let acp_results = evaluate_assertions(&assertions, &acp_trace);
+    assert!(
+        acp_results
+            .iter()
+            .any(|result| result.id == "reads-runtime" && result.pass),
+        "{acp_results:#?}"
+    );
 }
 
 #[test]
@@ -385,6 +450,73 @@ fn no_path_escape_inspects_tool_path_inputs_against_sandbox() {
         .expect("path assertion exists");
     assert!(!path_result.pass);
     assert!(path_result.detail.contains("../escape.txt"));
+}
+
+#[test]
+fn no_path_escape_inspects_acp_fs_and_terminal_paths() {
+    let tmp = TempDir::new().expect("temp dir");
+    fs::create_dir_all(tmp.path().join("src")).expect("src dir");
+    fs::write(tmp.path().join("src/lib.rs"), "ok").expect("file written");
+    let inside_file = tmp.path().join("src/lib.rs");
+
+    let mut inside_trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "fs/read_text_file",
+                serde_json::json!({"path": inside_file.display().to_string()}),
+            ),
+            Turn::assistant_with_tool(
+                "2",
+                "fs/write_text_file",
+                serde_json::json!({"path": "generated/output.txt"}),
+            ),
+            Turn::assistant_with_tool(
+                "3",
+                "terminal/create",
+                serde_json::json!({"cwd": tmp.path().display().to_string(), "command": "sh"}),
+            ),
+        ],
+        "done".to_string(),
+        1,
+        None,
+    );
+    inside_trace.runner.sandbox_path = Some(tmp.path().to_string_lossy().to_string());
+
+    let assertions = vec![AssertionSpec::NoPathEscape {
+        id: "paths-stay-inside".to_string(),
+        weight: 1.0,
+        tools: None,
+        allow_outside: None,
+    }];
+    let inside_results = evaluate_assertions(&assertions, &inside_trace);
+    assert!(
+        inside_results
+            .iter()
+            .any(|result| result.id == "paths-stay-inside" && result.pass),
+        "{inside_results:#?}"
+    );
+
+    let outside_path = tmp.path().parent().unwrap().join("outside.txt");
+    let mut outside_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "4",
+            "fs/read_text_file",
+            serde_json::json!({"path": outside_path.display().to_string()}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    outside_trace.runner.sandbox_path = Some(tmp.path().to_string_lossy().to_string());
+
+    let outside_results = evaluate_assertions(&assertions, &outside_trace);
+    let result = outside_results
+        .iter()
+        .find(|result| result.id == "paths-stay-inside")
+        .expect("assertion result");
+    assert!(!result.pass, "{outside_results:#?}");
+    assert!(result.detail.contains("fs/read_text_file.path"));
 }
 
 #[test]

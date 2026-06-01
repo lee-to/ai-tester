@@ -697,6 +697,63 @@ fn cli_run_with_fake_acp_stops_before_prompt_past_max_turns() {
 }
 
 #[test]
+fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_client_capabilities(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-capabilities\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-capabilities\nsystem_prompt: You are helpful.\nfixtures:\n  files_committed:\n    - path: notes/input.txt\n      content: \"hello from sandbox\\n\"\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: paths-stay-inside\n    type: no_path_escape\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--quiet",
+            "--idle-warn",
+            "3",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_fake-acp-capabilities"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    assert_eq!(trace["finalOutput"], "done");
+    assert_eq!(trace["toolCallSummary"]["byTool"]["fs/read_text_file"], 1);
+    assert_eq!(trace["toolCallSummary"]["byTool"]["fs/write_text_file"], 1);
+    assert_eq!(trace["toolCallSummary"]["byTool"]["terminal/create"], 1);
+    assert_eq!(
+        trace["toolCallSummary"]["byTool"]["terminal/wait_for_exit"],
+        1
+    );
+    assert_eq!(trace["toolCallSummary"]["byTool"]["terminal/kill"], 1);
+    assert!(trace_json.contains("\"_acpResolvedPath\""));
+    assert!(trace_json.contains("\"_acpResolvedCwd\""));
+    assert!(trace_json.contains("\"signal\": \"timeout\""));
+}
+
+#[test]
 fn cli_run_acp_requires_configured_agent() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1193,6 +1250,193 @@ done
             ),
         )
         .expect("fake acp written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_client_capabilities(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-capabilities.cmd");
+        let ps1_path = bin_dir.join("fake-acp-capabilities.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-capabilities.ps1\"\r\n",
+        )
+        .expect("fake acp capabilities wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+function Send-Request($id, $method, $params) {
+    Write-Json @{
+        jsonrpc = "2.0"
+        id = $id
+        method = $method
+        params = $params
+    }
+    $responseLine = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($responseLine)) {
+        return $null
+    }
+    return $responseLine | ConvertFrom-Json
+}
+
+$capsOk = $false
+$sessionCwd = $null
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        $caps = $message.params.clientCapabilities
+        $capsOk = [bool]($caps.fs.readTextFile -and $caps.fs.writeTextFile -and $caps.terminal)
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-capabilities"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        $sessionCwd = [string]$message.params.cwd
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                sessionId = "s1"
+                configOptions = @()
+            }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        if ($capsOk) {
+            $inputPath = Join-Path $sessionCwd "notes/input.txt"
+            $outputPath = Join-Path $sessionCwd "notes/output.txt"
+            $read = Send-Request "fs-read-1" "fs/read_text_file" @{
+                sessionId = "s1"
+                path = $inputPath
+                line = 1
+                limit = 1
+            }
+            $content = if ($null -ne $read.result.content) { $read.result.content } else { "missing" }
+            $null = Send-Request "fs-write-1" "fs/write_text_file" @{
+                sessionId = "s1"
+                path = $outputPath
+                content = $content
+            }
+            $created = Send-Request "term-create-1" "terminal/create" @{
+                sessionId = "s1"
+                command = "powershell"
+                args = @("-NoProfile", "-Command", "Start-Sleep -Seconds 5")
+                cwd = $sessionCwd
+                outputByteLimit = 1024
+            }
+            $terminalId = [string]$created.result.terminalId
+            $null = Send-Request "term-output-1" "terminal/output" @{
+                sessionId = "s1"
+                terminalId = $terminalId
+            }
+            $null = Send-Request "term-wait-1" "terminal/wait_for_exit" @{
+                sessionId = "s1"
+                terminalId = $terminalId
+            }
+            $null = Send-Request "term-kill-1" "terminal/kill" @{
+                sessionId = "s1"
+                terminalId = $terminalId
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{}
+        }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp capabilities script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-capabilities");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+caps_ok=0
+session_cwd=""
+
+send_request() {
+  printf '%s\n' "$1"
+  IFS= read -r response
+}
+
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      case "$line" in
+        *'"readTextFile":true*'"writeTextFile":true*'"terminal":true*) caps_ok=1 ;;
+        *) caps_ok=0 ;;
+      esac
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-capabilities\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      session_cwd=$(printf '%s' "$line" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      if [ "$caps_ok" = "1" ]; then
+        input_path="$session_cwd/notes/input.txt"
+        output_path="$session_cwd/notes/output.txt"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-read-1\",\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$input_path\",\"line\":1,\"limit\":1}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-write-1\",\"method\":\"fs/write_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$output_path\",\"content\":\"written from acp\n\"}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 5\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
+        terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-1\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-1\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-kill-1\",\"method\":\"terminal/kill\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+      fi
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp capabilities written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
