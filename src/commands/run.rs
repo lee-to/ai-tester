@@ -173,8 +173,8 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .runner
                 .agent
                 .as_deref()
-                .and_then(|name| config.acp_agents.get(name))
-                .cloned()
+                .map(|name| crate::config::resolve_acp_agent_for_run(&config, name))
+                .transpose()?
         } else {
             None
         };
@@ -689,7 +689,7 @@ fn build_acp_transcript_config(
     skill: &ResolvedSkill,
     scenario: &Scenario,
     started_at: chrono::DateTime<Utc>,
-    acp_agent: &Option<crate::config::AcpAgentConfig>,
+    acp_agent: &Option<crate::config::ResolvedAcpAgent>,
     mcp_servers: &[crate::config::NamedMcpServerConfig],
 ) -> anyhow::Result<Option<crate::runtime::AcpTranscriptConfig>> {
     if runtime_name != "acp" {
@@ -719,18 +719,15 @@ fn build_acp_transcript_config(
 }
 
 fn collect_acp_redaction_values(
-    acp_agent: &Option<crate::config::AcpAgentConfig>,
+    acp_agent: &Option<crate::config::ResolvedAcpAgent>,
     mcp_servers: &[crate::config::NamedMcpServerConfig],
 ) -> Vec<String> {
     let mut values = Vec::new();
-    if let Some(agent) = acp_agent {
-        values.extend(
-            agent
-                .env
-                .values()
-                .filter(|value| !value.is_empty())
-                .cloned(),
-        );
+    if let Some(env) = acp_agent
+        .as_ref()
+        .and_then(crate::config::ResolvedAcpAgent::configured_env)
+    {
+        values.extend(env.values().filter(|value| !value.is_empty()).cloned());
     }
     for server in mcp_servers {
         values.extend(

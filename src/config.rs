@@ -42,6 +42,105 @@ pub struct AcpAgentConfig {
     pub env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinAcpAgentProfile {
+    Gemini,
+    ZedClaude,
+    ZedCodex,
+}
+
+pub const BUILTIN_ACP_AGENT_PROFILES: [BuiltinAcpAgentProfile; 3] = [
+    BuiltinAcpAgentProfile::Gemini,
+    BuiltinAcpAgentProfile::ZedClaude,
+    BuiltinAcpAgentProfile::ZedCodex,
+];
+
+impl BuiltinAcpAgentProfile {
+    pub fn from_name(name: &str) -> Option<Self> {
+        BUILTIN_ACP_AGENT_PROFILES
+            .iter()
+            .copied()
+            .find(|profile| profile.name() == name)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::ZedClaude => "zed-claude",
+            Self::ZedCodex => "zed-codex",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        "npx"
+    }
+
+    pub fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Gemini => &[
+                "-y",
+                "--",
+                "@google/gemini-cli@latest",
+                "--experimental-acp",
+            ],
+            Self::ZedClaude => &["-y", "@zed-industries/claude-code-acp@latest"],
+            Self::ZedCodex => &["-y", "@zed-industries/codex-acp@latest"],
+        }
+    }
+
+    pub fn display_command(self) -> String {
+        format!("{} {}", self.command(), self.args().join(" "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpAgentLaunch {
+    Configured(AcpAgentConfig),
+    Builtin(BuiltinAcpAgentProfile),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAcpAgent {
+    pub name: String,
+    pub launch: AcpAgentLaunch,
+}
+
+impl ResolvedAcpAgent {
+    pub fn command(&self) -> &str {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => &config.command,
+            AcpAgentLaunch::Builtin(profile) => profile.command(),
+        }
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => config.args.clone(),
+            AcpAgentLaunch::Builtin(profile) => profile
+                .args()
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect(),
+        }
+    }
+
+    pub fn display_command(&self) -> String {
+        let args = self.args();
+        if args.is_empty() {
+            self.command().to_string()
+        } else {
+            format!("{} {}", self.command(), args.join(" "))
+        }
+    }
+
+    pub fn configured_env(&self) -> Option<&BTreeMap<String, String>> {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => Some(&config.env),
+            AcpAgentLaunch::Builtin(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpServerTransport {
@@ -237,6 +336,45 @@ pub fn resolve_mcp_servers_for_run(
         profile: selected_profile.map(ToOwned::to_owned),
         servers,
     })
+}
+
+pub fn resolve_acp_agent_for_run(
+    project: &ProjectConfig,
+    name: &str,
+) -> anyhow::Result<ResolvedAcpAgent> {
+    if let Some(config) = project.acp_agents.get(name) {
+        return Ok(ResolvedAcpAgent {
+            name: name.to_string(),
+            launch: AcpAgentLaunch::Configured(config.clone()),
+        });
+    }
+
+    if let Some(profile) = BuiltinAcpAgentProfile::from_name(name) {
+        return Ok(ResolvedAcpAgent {
+            name: name.to_string(),
+            launch: AcpAgentLaunch::Builtin(profile),
+        });
+    }
+
+    bail!(
+        "unknown ACP agent `{name}`. Available ACP agents: {}",
+        available_acp_agent_names(project).join(", ")
+    )
+}
+
+pub fn available_acp_agent_names(project: &ProjectConfig) -> Vec<String> {
+    unique_ordered(
+        project
+            .acp_agents
+            .keys()
+            .cloned()
+            .chain(
+                BUILTIN_ACP_AGENT_PROFILES
+                    .iter()
+                    .map(|profile| profile.name().to_string()),
+            )
+            .collect(),
+    )
 }
 
 pub fn mcp_servers_diagnostic(servers: &[NamedMcpServerConfig]) -> String {

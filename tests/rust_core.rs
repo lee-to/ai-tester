@@ -1,6 +1,7 @@
 use ai_tester::assertions::{compute_weighted_score, evaluate_assertions};
 use ai_tester::config::{
-    load_project_config, mcp_servers_diagnostic, resolve_mcp_servers_for_run, McpServerTransport,
+    load_project_config, mcp_servers_diagnostic, resolve_acp_agent_for_run,
+    resolve_mcp_servers_for_run, AcpAgentLaunch, BuiltinAcpAgentProfile, McpServerTransport,
 };
 use ai_tester::runtime::{
     parse_claude_jsonl, parse_claude_jsonl_with_user_responses, parse_codex_jsonl,
@@ -197,6 +198,58 @@ fn project_config_parses_acp_agent_registry_and_default_agent() {
     assert_eq!(local.command, "fake-acp");
     assert_eq!(local.args, vec!["--stdio"]);
     assert_eq!(local.env.get("ACP_FLAG").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn acp_agent_resolution_uses_builtins_and_manual_override() {
+    let tmp = TempDir::new().expect("temp dir");
+    let config = load_project_config(tmp.path()).expect("config loads without file");
+
+    let builtin = resolve_acp_agent_for_run(&config, "gemini").expect("gemini built-in resolves");
+    assert_eq!(builtin.name, "gemini");
+    assert_eq!(builtin.command(), "npx");
+    assert_eq!(
+        builtin.args(),
+        vec![
+            "-y",
+            "--",
+            "@google/gemini-cli@latest",
+            "--experimental-acp"
+        ]
+    );
+    assert!(matches!(
+        builtin.launch,
+        AcpAgentLaunch::Builtin(BuiltinAcpAgentProfile::Gemini)
+    ));
+
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  gemini:\n    command: fake-acp\n    args: [--stdio]\n",
+    )
+    .expect("config written");
+    let config = load_project_config(tmp.path()).expect("config loads");
+    let manual = resolve_acp_agent_for_run(&config, "gemini").expect("manual gemini resolves");
+    assert_eq!(manual.command(), "fake-acp");
+    assert_eq!(manual.args(), vec!["--stdio"]);
+    assert!(matches!(manual.launch, AcpAgentLaunch::Configured(_)));
+}
+
+#[test]
+fn acp_agent_resolution_unknown_lists_available_names() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp\n",
+    )
+    .expect("config written");
+    let config = load_project_config(tmp.path()).expect("config loads");
+    let err = resolve_acp_agent_for_run(&config, "missing").expect_err("unknown agent rejected");
+    let message = err.to_string();
+    assert!(message.contains("unknown ACP agent `missing`"));
+    assert!(message.contains("local"));
+    assert!(message.contains("gemini"));
+    assert!(message.contains("zed-claude"));
+    assert!(message.contains("zed-codex"));
 }
 
 #[test]

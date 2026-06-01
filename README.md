@@ -101,7 +101,7 @@ defaults:
   # mode: plan
   # reasoning: high
 
-# Optional ACP agent registry:
+# Optional ACP agent registry for manual overrides/custom agents:
 # acp_agents:
 #   gemini:
 #     command: gemini
@@ -487,7 +487,17 @@ The Rust rewrite uses external CLIs and parses JSONL output. It does not embed t
 
 ### ACP
 
-ACP agents are configured in `.ai-tester.yaml`:
+ACP includes built-in compatibility profiles for `gemini`, `zed-claude`, and `zed-codex`.
+They run through `npx` using the upstream ACP helper commands, so a minimal ACP config does
+not need an `acp_agents` block:
+
+```yaml
+defaults:
+  runtime: acp
+  agent: gemini
+```
+
+Manual `acp_agents` entries are still supported and override a built-in with the same name:
 
 ```yaml
 defaults:
@@ -496,10 +506,14 @@ defaults:
 
 acp_agents:
   gemini:
-    command: gemini
+    command: ./scripts/local-gemini-acp
     args: ["--experimental-acp"]
     env: {}
+```
 
+MCP servers can be forwarded to ACP sessions:
+
+```yaml
 mcp_servers:
   codegraph:
     command: mock-codegraph
@@ -519,7 +533,11 @@ mcp_profiles:
     servers: [codegraph, docs]
 ```
 
+`ai-tester init --acp-agent gemini` creates a minimal built-in ACP template. `ai-tester runtimes` shows both configured ACP agents and the built-in profiles with their resolved commands. Built-ins inherit the current process environment; use a manual `acp_agents` override when a profile needs explicit env values or a pinned command.
+
 Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. `defaults.mcp_profile`, scenario `runner.mcp_profile`, or `ai-tester run --mcp-profile <name>` chooses a profile from `mcp_profiles`; CLI has highest precedence. Scenario-level `mcp_servers` may override or add servers for a single run. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, forwards the effective MCP servers in `session/new.mcpServers`, applies requested ACP model/mode/reasoning config when the agent exposes compatible session options, then sends each scripted user prompt through that session.
+
+Built-in auth requirements come from the underlying agent CLIs: Gemini supports Gemini CLI auth or `GEMINI_API_KEY` ([Gemini CLI auth docs](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html)); `zed-claude` uses Claude Code auth or Anthropic credentials such as `ANTHROPIC_API_KEY` ([Claude Code auth docs](https://code.claude.com/docs/en/authentication)); `zed-codex` uses Codex/OpenAI credentials ([Codex CLI sign-in docs](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)).
 
 ACP model/mode negotiation uses `runner.model`, `runner.mode`, and `runner.reasoning`, with CLI flags `--model`, `--mode`, and `--reasoning` taking precedence. `runner.mode` is an ACP session mode/config selector and is separate from `permission_mode`. Explicit values from CLI, scenario YAML, or project defaults fail fast when the agent does not expose a matching option or value; the built-in model default is not forced onto ACP agents that do not advertise model selection. Successful ACP traces include an `ACP effective config` diagnostic with the applied model/mode/reasoning.
 

@@ -97,6 +97,24 @@ fn cli_init_writes_project_config() {
 }
 
 #[test]
+fn cli_init_with_builtin_acp_agent_writes_minimal_template() {
+    let tmp = TempDir::new().expect("temp dir");
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["init", "--acp-agent", "gemini"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(".ai-tester.yaml"));
+
+    let config = fs::read_to_string(tmp.path().join(".ai-tester.yaml")).expect("config written");
+    assert!(config.contains("runtime: acp"));
+    assert!(config.contains("agent: gemini"));
+    assert!(config.contains("permission_mode: bypassPermissions"));
+    assert!(!config.contains("acp_agents:"));
+    assert!(!config.contains("model:"));
+}
+
+#[test]
 fn cli_run_dry_run_loads_file_without_creating_runtime_sandbox() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1117,6 +1135,108 @@ fn cli_runtimes_lists_configured_acp_agents() {
 }
 
 #[test]
+fn cli_runtimes_lists_builtin_acp_agents() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_npx_acp(&bin_dir);
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["runtimes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("acp:gemini"))
+        .stdout(predicate::str::contains("@google/gemini-cli@latest"))
+        .stdout(predicate::str::contains("acp:zed-claude"))
+        .stdout(predicate::str::contains(
+            "@zed-industries/claude-code-acp@latest",
+        ))
+        .stdout(predicate::str::contains("acp:zed-codex"))
+        .stdout(predicate::str::contains("@zed-industries/codex-acp@latest"))
+        .stdout(predicate::str::contains("ready"));
+}
+
+#[test]
+fn cli_run_uses_builtin_gemini_without_acp_agents_block() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    let npx_args = tmp.path().join("npx-args.txt");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_npx_acp(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\ndefaults:\n  runtime: acp\n  agent: gemini\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: builtin-gemini\nsystem_prompt: You are helpful.\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .env("FAKE_NPX_ARGS_OUT", &npx_args)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let args = fs::read_to_string(npx_args).expect("npx args captured");
+    assert!(args.contains("-y"));
+    assert!(args.contains("--"));
+    assert!(args.contains("@google/gemini-cli@latest"));
+    assert!(args.contains("--experimental-acp"));
+}
+
+#[test]
+fn cli_run_manual_acp_agent_overrides_builtin_name() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    let npx_args = tmp.path().join("npx-args.txt");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_npx_acp(&bin_dir);
+    write_fake_acp(&bin_dir, false);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\ndefaults:\n  runtime: acp\n  agent: gemini\nacp_agents:\n  gemini:\n    command: fake-acp\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: manual-overrides-gemini\nsystem_prompt: You are helpful.\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .env("FAKE_NPX_ARGS_OUT", &npx_args)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    assert!(
+        !npx_args.exists(),
+        "manual override should not invoke built-in npx"
+    );
+}
+
+#[test]
 fn cli_run_with_fake_codex_prints_live_progress() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -1571,6 +1691,114 @@ done
             ),
         )
         .expect("fake acp written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_npx_acp(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("npx.cmd");
+        let ps1_path = bin_dir.join("npx.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0npx.ps1\" %*\r\n",
+        )
+        .expect("fake npx wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+if ($env:FAKE_NPX_ARGS_OUT) {
+    [System.IO.File]::WriteAllText($env:FAKE_NPX_ARGS_OUT, ($args -join "`n"))
+}
+
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+                agentInfo = @{ name = "fake-npx-acp"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ sessionId = "s1"; configOptions = @() }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake npx script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("npx");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ -n "$FAKE_NPX_ARGS_OUT" ]; then
+  printf '%s\n' "$@" > "$FAKE_NPX_ARGS_OUT"
+fi
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-npx-acp\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake npx written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");

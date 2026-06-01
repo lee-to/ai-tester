@@ -24,7 +24,8 @@ use anyhow::Context;
 use serde_json::{Map, Value};
 
 use crate::config::{
-    mcp_servers_diagnostic, AcpAgentConfig, McpServerTransport, NamedMcpServerConfig,
+    mcp_servers_diagnostic, AcpAgentLaunch, BuiltinAcpAgentProfile, McpServerTransport,
+    NamedMcpServerConfig, ResolvedAcpAgent,
 };
 use crate::scenario::{Runner, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, Turn};
@@ -1192,14 +1193,40 @@ fn acp_tool_call_label(title: &str, kind: &str, raw_input: Option<&Value>) -> St
     }
 }
 
-fn build_acp_agent(config: &AcpAgentConfig) -> anyhow::Result<AcpAgent> {
-    let mut args = config
-        .env
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>();
-    args.push(resolve_command_path(&config.command).unwrap_or_else(|| config.command.clone()));
-    args.extend(config.args.clone());
+fn build_acp_agent(agent: &ResolvedAcpAgent) -> anyhow::Result<AcpAgent> {
+    match &agent.launch {
+        AcpAgentLaunch::Configured(config) => {
+            let mut args = config
+                .env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>();
+            args.push(
+                resolve_command_path(&config.command).unwrap_or_else(|| config.command.clone()),
+            );
+            args.extend(config.args.clone());
+            AcpAgent::from_args(args).map_err(|err| anyhow::anyhow!("{err}"))
+        }
+        AcpAgentLaunch::Builtin(profile) => build_builtin_acp_agent(*profile),
+    }
+}
+
+#[cfg(not(windows))]
+fn build_builtin_acp_agent(profile: BuiltinAcpAgentProfile) -> anyhow::Result<AcpAgent> {
+    Ok(match profile {
+        BuiltinAcpAgentProfile::Gemini => AcpAgent::google_gemini(),
+        BuiltinAcpAgentProfile::ZedClaude => AcpAgent::zed_claude_code(),
+        BuiltinAcpAgentProfile::ZedCodex => AcpAgent::zed_codex(),
+    })
+}
+
+#[cfg(windows)]
+fn build_builtin_acp_agent(profile: BuiltinAcpAgentProfile) -> anyhow::Result<AcpAgent> {
+    let mut args = Vec::new();
+    args.push(
+        resolve_command_path(profile.command()).unwrap_or_else(|| profile.command().to_string()),
+    );
+    args.extend(profile.args().iter().map(|arg| (*arg).to_string()));
     AcpAgent::from_args(args).map_err(|err| anyhow::anyhow!("{err}"))
 }
 

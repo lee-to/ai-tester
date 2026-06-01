@@ -21,10 +21,12 @@ enum Commands {
         force: bool,
         #[arg(long, default_value = "./skills")]
         skills_dir: String,
-        #[arg(long, default_value = crate::config::DEFAULT_MODEL)]
-        model: String,
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long, default_value = "bypassPermissions")]
         permission_mode: String,
+        #[arg(long)]
+        acp_agent: Option<String>,
     },
     Run {
         skill: Option<String>,
@@ -126,11 +128,13 @@ pub fn main_entry() -> anyhow::Result<()> {
             skills_dir,
             model,
             permission_mode,
+            acp_agent,
         } => init_command(InitOptions {
             force,
             skills_dir,
             model,
             permission_mode,
+            acp_agent,
         })?,
         Commands::Run {
             skill,

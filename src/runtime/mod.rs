@@ -491,7 +491,34 @@ pub fn list_runtime_statuses(config: &crate::config::ProjectConfig) -> Vec<Runti
         ),
         preflight("codex", "OpenAI Codex via `codex exec --json`."),
     ];
+    for profile in crate::config::BUILTIN_ACP_AGENT_PROFILES {
+        let name = profile.name();
+        if let Some(agent) = config.acp_agents.get(name) {
+            statuses.push(preflight_dynamic(
+                format!("acp:{name}"),
+                format!(
+                    "ACP agent via `{}`{}.",
+                    agent.command,
+                    if agent.args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", agent.args.join(" "))
+                    }
+                ),
+                &agent.command,
+            ));
+        } else {
+            statuses.push(preflight_dynamic(
+                format!("acp:{name}"),
+                format!("Built-in ACP agent via `{}`.", profile.display_command()),
+                profile.command(),
+            ));
+        }
+    }
     for (name, agent) in &config.acp_agents {
+        if crate::config::BuiltinAcpAgentProfile::from_name(name).is_some() {
+            continue;
+        }
         statuses.push(preflight_dynamic(
             format!("acp:{name}"),
             format!(
@@ -526,21 +553,19 @@ pub fn runtime_status_for_scenario(
                     ),
                 };
             };
-            let Some(agent) = config.acp_agents.get(agent_name) else {
-                return RuntimeStatus {
+            match crate::config::resolve_acp_agent_for_run(config, agent_name) {
+                Ok(agent) => preflight_dynamic(
+                    format!("acp:{agent_name}"),
+                    format!("ACP agent via `{}`.", agent.display_command()),
+                    agent.command(),
+                ),
+                Err(err) => RuntimeStatus {
                     name: format!("acp:{agent_name}"),
                     description: "Configured ACP agent.".to_string(),
                     ready: false,
-                    message: Some(format!(
-                        "`runtime: acp` references unknown agent `{agent_name}`"
-                    )),
-                };
-            };
-            preflight_dynamic(
-                format!("acp:{agent_name}"),
-                format!("ACP agent via `{}`.", agent.command),
-                &agent.command,
-            )
+                    message: Some(err.to_string()),
+                },
+            }
         }
         "claude" => preflight(
             "claude",
@@ -569,7 +594,7 @@ pub struct RuntimeRunRequest {
     pub progress: bool,
     pub idle_warn_seconds: u64,
     pub acp_agent_name: Option<String>,
-    pub acp_agent: Option<crate::config::AcpAgentConfig>,
+    pub acp_agent: Option<crate::config::ResolvedAcpAgent>,
     pub mcp_servers: Vec<crate::config::NamedMcpServerConfig>,
     pub acp_config: AcpConfigRequest,
     pub acp_transcript: Option<AcpTranscriptConfig>,
