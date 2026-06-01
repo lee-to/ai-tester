@@ -572,6 +572,7 @@ pub struct RuntimeRunRequest {
     pub acp_agent: Option<crate::config::AcpAgentConfig>,
     pub mcp_servers: Vec<crate::config::NamedMcpServerConfig>,
     pub acp_config: AcpConfigRequest,
+    pub acp_transcript: Option<AcpTranscriptConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -579,6 +580,12 @@ pub struct AcpConfigRequest {
     pub model: Option<String>,
     pub mode: Option<String>,
     pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpTranscriptConfig {
+    pub path: PathBuf,
+    pub redaction_values: Vec<String>,
 }
 
 pub fn runtime_ready(name: &str) -> bool {
@@ -1626,6 +1633,7 @@ mod tests {
             acp_agent: None,
             mcp_servers: Vec::new(),
             acp_config: AcpConfigRequest::default(),
+            acp_transcript: None,
         };
 
         let args = build_claude_args(&req, 3, None, "do it", true);

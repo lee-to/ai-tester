@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use anyhow::Context;
 use chrono::Utc;
 
 use crate::assertions::{compute_weighted_score, evaluate_assertions, AssertionResult};
@@ -37,6 +38,7 @@ pub struct RunOptions {
     pub runtime: Option<String>,
     pub agent: Option<String>,
     pub mcp_profile: Option<String>,
+    pub acp_log: Option<PathBuf>,
     pub filter: Option<String>,
     pub dry_run: bool,
     pub keep_sandbox: bool,
@@ -199,6 +201,17 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
 
         let started_at = Utc::now();
         let start = Instant::now();
+        let acp_transcript = build_acp_transcript_config(
+            idx + 1,
+            &opts,
+            &runtime_name,
+            &skill,
+            &scenario,
+            started_at,
+            &acp_agent,
+            &mcp_servers,
+        )?;
+        let acp_transcript_for_error = acp_transcript.clone();
         let sandbox = create_sandbox(
             &scenario.scenario,
             &scenario.fixtures,
@@ -250,12 +263,20 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             acp_agent,
             mcp_servers,
             acp_config,
+            acp_transcript,
         }) {
             Ok(result) => result,
             Err(err) => {
                 if !silent {
                     println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
                     println!("  {}{err}", ui::label("reason"));
+                    if let Some(transcript) = &acp_transcript_for_error {
+                        println!(
+                            "  {}{}",
+                            ui::label("ACP transcript"),
+                            transcript.path.display()
+                        );
+                    }
                 }
                 let _ = sandbox.cleanup();
                 runtime_errors += 1;
@@ -659,6 +680,79 @@ fn build_acp_config_request(
             .then(|| scenario.runner.reasoning.clone())
             .flatten(),
     }
+}
+
+fn build_acp_transcript_config(
+    index: usize,
+    opts: &RunOptions,
+    runtime_name: &str,
+    skill: &ResolvedSkill,
+    scenario: &Scenario,
+    started_at: chrono::DateTime<Utc>,
+    acp_agent: &Option<crate::config::AcpAgentConfig>,
+    mcp_servers: &[crate::config::NamedMcpServerConfig],
+) -> anyhow::Result<Option<crate::runtime::AcpTranscriptConfig>> {
+    if runtime_name != "acp" {
+        return Ok(None);
+    }
+    let Some(log_dir) = &opts.acp_log else {
+        return Ok(None);
+    };
+    let log_dir = if log_dir.is_absolute() {
+        log_dir.clone()
+    } else {
+        std::env::current_dir()?.join(log_dir)
+    };
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("create ACP log dir {}", log_dir.display()))?;
+    let file_name = format!(
+        "{index:03}-{}__{}__{}__{}.acp.jsonl",
+        crate::trace::sanitize_path_segment(&skill.name),
+        crate::trace::sanitize_path_segment(&scenario.scenario),
+        started_at.format("%Y-%m-%dT%H-%M-%SZ"),
+        &skill.source_hash[..8]
+    );
+    Ok(Some(crate::runtime::AcpTranscriptConfig {
+        path: log_dir.join(file_name),
+        redaction_values: collect_acp_redaction_values(acp_agent, mcp_servers),
+    }))
+}
+
+fn collect_acp_redaction_values(
+    acp_agent: &Option<crate::config::AcpAgentConfig>,
+    mcp_servers: &[crate::config::NamedMcpServerConfig],
+) -> Vec<String> {
+    let mut values = Vec::new();
+    if let Some(agent) = acp_agent {
+        values.extend(
+            agent
+                .env
+                .values()
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        );
+    }
+    for server in mcp_servers {
+        values.extend(
+            server
+                .config
+                .env
+                .values()
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        );
+        values.extend(
+            server
+                .config
+                .headers
+                .values()
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        );
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {

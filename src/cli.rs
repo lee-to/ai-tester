@@ -47,6 +47,8 @@ enum Commands {
         #[arg(long)]
         mcp_profile: Option<String>,
         #[arg(long)]
+        acp_log: Option<PathBuf>,
+        #[arg(long)]
         filter: Option<String>,
         #[arg(long)]
         dry_run: bool,
@@ -141,6 +143,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             runtime,
             agent,
             mcp_profile,
+            acp_log,
             filter,
             dry_run,
             keep_sandbox,
@@ -158,6 +161,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             runtime,
             agent,
             mcp_profile,
+            acp_log,
             filter,
             dry_run,
             keep_sandbox,

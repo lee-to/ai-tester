@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +19,7 @@ use agent_client_protocol::schema::{
     ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, SessionMessage};
+use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, LineDirection, SessionMessage};
 use anyhow::Context;
 use serde_json::{Map, Value};
 
@@ -27,6 +29,7 @@ use crate::config::{
 use crate::scenario::{Runner, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, Turn};
 use crate::ui::{self, Tone};
+use crate::util::redaction::Redactor;
 use crate::util::regex::compile_pattern;
 
 use super::{RuntimeRunRequest, RuntimeRunResult};
@@ -56,7 +59,19 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         .acp_agent
         .clone()
         .with_context(|| format!("unknown ACP agent `{agent_name}`"))?;
-    let acp_agent = build_acp_agent(&agent_config)?;
+    let transcript_logger = req
+        .acp_transcript
+        .clone()
+        .map(AcpTranscriptLogger::new)
+        .transpose()?
+        .map(Arc::new);
+    let mut acp_agent = build_acp_agent(&agent_config)?;
+    if let Some(logger) = &transcript_logger {
+        let logger_for_debug = Arc::clone(logger);
+        acp_agent = acp_agent.with_debug(move |line, direction| {
+            logger_for_debug.record(line, direction);
+        });
+    }
     let process_cwd = req.cwd.clone();
     let session_cwd = acp_session_cwd(&process_cwd);
     let user_messages = build_acp_user_messages(&req);
@@ -303,6 +318,9 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
 
     if let Ok(diagnostics) = permission_diagnostics.lock() {
         result.diagnostics.extend(diagnostics.iter().cloned());
+    }
+    if let Some(logger) = transcript_logger {
+        result.diagnostics.extend(logger.diagnostics());
     }
     Ok(result)
 }
@@ -846,6 +864,86 @@ fn acp_effective_config_diagnostic(applied: &[AcpAppliedConfig]) -> Option<Strin
 
 fn acp_invalid_params_error(message: impl std::fmt::Display) -> agent_client_protocol::Error {
     agent_client_protocol::Error::new(-32602, message.to_string())
+}
+
+#[derive(Debug)]
+struct AcpTranscriptLogger {
+    path: PathBuf,
+    file: Mutex<File>,
+    redactor: Redactor,
+    first_error: Mutex<Option<String>>,
+}
+
+impl AcpTranscriptLogger {
+    fn new(config: super::AcpTranscriptConfig) -> anyhow::Result<Self> {
+        if let Some(parent) = config.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create ACP transcript dir {}", parent.display()))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&config.path)
+            .with_context(|| format!("open ACP transcript {}", config.path.display()))?;
+        Ok(Self {
+            path: config.path,
+            file: Mutex::new(file),
+            redactor: Redactor::new(config.redaction_values),
+            first_error: Mutex::new(None),
+        })
+    }
+
+    fn record(&self, line: &str, direction: LineDirection) {
+        let record = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "direction": line_direction_name(direction),
+            "line": self.redactor.redact_line(line),
+        });
+        let serialized = match serde_json::to_string(&record) {
+            Ok(serialized) => serialized,
+            Err(err) => {
+                self.store_error(format!("serialize ACP transcript record failed: {err}"));
+                return;
+            }
+        };
+        let result = self
+            .file
+            .lock()
+            .map_err(|_| std::io::Error::other("ACP transcript lock poisoned"))
+            .and_then(|mut file| {
+                file.write_all(serialized.as_bytes())?;
+                file.write_all(b"\n")?;
+                file.flush()
+            });
+        if let Err(err) = result {
+            self.store_error(format!("write ACP transcript failed: {err}"));
+        }
+    }
+
+    fn diagnostics(&self) -> Vec<String> {
+        let mut diagnostics = vec![format!("ACP transcript: {}", self.path.display())];
+        if let Some(err) = self.first_error.lock().ok().and_then(|err| err.clone()) {
+            diagnostics.push(format!("ACP transcript error: {err}"));
+        }
+        diagnostics
+    }
+
+    fn store_error(&self, message: String) {
+        if let Ok(mut first_error) = self.first_error.lock() {
+            if first_error.is_none() {
+                *first_error = Some(message);
+            }
+        }
+    }
+}
+
+fn line_direction_name(direction: LineDirection) -> &'static str {
+    match direction {
+        LineDirection::Stdin => "stdin",
+        LineDirection::Stdout => "stdout",
+        LineDirection::Stderr => "stderr",
+    }
 }
 
 struct AcpProgress {

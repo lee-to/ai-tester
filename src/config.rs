@@ -358,19 +358,7 @@ fn redacted_string_map(values: &BTreeMap<String, String>) -> Map<String, Value> 
 }
 
 fn redact_url(url: &str) -> String {
-    let (without_fragment, fragment) = url
-        .split_once('#')
-        .map(|(url, fragment)| (url, Some(fragment)))
-        .unwrap_or((url, None));
-    let mut redacted = without_fragment
-        .split_once('?')
-        .map(|(base, _)| format!("{base}?<redacted>"))
-        .unwrap_or_else(|| without_fragment.to_string());
-    if let Some(fragment) = fragment {
-        redacted.push('#');
-        redacted.push_str(fragment);
-    }
-    redacted
+    crate::util::redaction::redact_url_query(url)
 }
 
 fn mcp_transport_name(transport: &McpServerTransport) -> &'static str {

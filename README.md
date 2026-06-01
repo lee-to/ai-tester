@@ -154,6 +154,7 @@ ai-tester run --file ./scenario.yaml --runtime codex
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --model gpt-5-codex --mode plan --reasoning high
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-log ./acp-logs
 ai-tester run --dir ./prompts --runtime codex
 
 # Choose output format (default: live events + summary)
@@ -523,6 +524,8 @@ Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent.
 ACP model/mode negotiation uses `runner.model`, `runner.mode`, and `runner.reasoning`, with CLI flags `--model`, `--mode`, and `--reasoning` taking precedence. `runner.mode` is an ACP session mode/config selector and is separate from `permission_mode`. Explicit values from CLI, scenario YAML, or project defaults fail fast when the agent does not expose a matching option or value; the built-in model default is not forced onto ACP agents that do not advertise model selection. Successful ACP traces include an `ACP effective config` diagnostic with the applied model/mode/reasoning.
 
 Supported MCP transports are stdio (default when `type` is omitted), `http`, and `sse`. Stdio servers use `command`, optional `args`, and optional `env`; HTTP/SSE servers use `url` and optional `headers`. Env and header values are redacted in ai-tester trace diagnostics.
+
+For ACP protocol debugging, pass `--acp-log <dir>`. The path is treated as a directory relative to the current working directory unless absolute. Each ACP scenario writes one redacted JSONL transcript with raw stdin/stdout/stderr lines captured through the ACP transport debug hook. Protocol errors print the transcript path in live output so incompatible agents can be inspected without leaking configured env/header secrets.
 
 ACP traces count one assistant turn per scripted user prompt sent to the ACP session. This differs from the Claude and Codex adapters, which derive turns from their runtime event streams. As a result, `turn_count_at_most` and explicit `max_turns` limits are comparable within ACP runs but not strictly identical across runtimes.
 

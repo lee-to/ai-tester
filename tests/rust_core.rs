@@ -13,6 +13,7 @@ use ai_tester::trace::{ToolCallRecord, TraceRecord, Turn};
 use ai_tester::util::path::{
     resolve_existing_inside, resolve_write_target_inside, strip_windows_verbatim_prefix,
 };
+use ai_tester::util::redaction::Redactor;
 use ai_tester::util::regex::compile_pattern;
 use std::fs;
 use std::path::Path;
@@ -335,6 +336,30 @@ mcp_profiles:
     let missing_command = resolve_mcp_servers_for_run(&config, &scenario.mcp_servers, None, None)
         .expect_err("missing stdio command rejected");
     assert!(missing_command.to_string().contains("requires `command`"));
+}
+
+#[test]
+fn redactor_removes_json_and_plain_text_secrets() {
+    let redactor = Redactor::new(vec![
+        "known-secret".to_string(),
+        "Bearer configured-secret".to_string(),
+    ]);
+
+    let json = redactor.redact_line(
+        r#"{"token":"raw-secret","nested":{"api_key":"known-secret"},"env":{"name":"API_TOKEN","value":"known-secret"},"url":"http://127.0.0.1:3001/mcp?token=raw-secret"}"#,
+    );
+    assert!(json.contains("<redacted>"));
+    assert!(!json.contains("raw-secret"));
+    assert!(!json.contains("known-secret"));
+    assert!(json.contains("http://127.0.0.1:3001/mcp?<redacted>"));
+
+    let plain = redactor.redact_line(
+        "Authorization: Bearer configured-secret TOKEN=known-secret password='raw-secret'",
+    );
+    assert!(plain.contains("<redacted>"));
+    assert!(!plain.contains("configured-secret"));
+    assert!(!plain.contains("known-secret"));
+    assert!(!plain.contains("raw-secret"));
 }
 
 #[test]

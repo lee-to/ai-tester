@@ -958,6 +958,123 @@ fn cli_run_with_fake_acp_rejects_unsupported_explicit_model() {
 }
 
 #[test]
+fn cli_run_with_fake_acp_writes_redacted_transcript() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    let log_dir = tmp.path().join("acp-logs");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_transcript(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        r#"skills_dir: ./skills
+acp_agents:
+  local:
+    command: fake-acp-transcript
+    args: []
+    env:
+      ACP_TOKEN: acp-agent-secret
+mcp_servers:
+  codegraph:
+    command: mock-codegraph
+    env:
+      API_TOKEN: mcp-secret
+"#,
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-transcript\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--quiet",
+            "--acp-log",
+            log_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let transcript_files = fs::read_dir(&log_dir)
+        .expect("log dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("log entries");
+    assert_eq!(transcript_files.len(), 1);
+    let transcript = fs::read_to_string(transcript_files[0].path()).expect("transcript readable");
+    assert!(transcript.contains(r#""direction":"stdin""#));
+    assert!(transcript.contains(r#""direction":"stdout""#));
+    assert!(transcript.contains(r#""direction":"stderr""#));
+    assert!(transcript.contains("initialize"));
+    assert!(transcript.contains("session/new"));
+    assert!(transcript.contains("<redacted>"));
+    assert!(!transcript.contains("acp-agent-secret"));
+    assert!(!transcript.contains("mcp-secret"));
+    assert!(!transcript.contains("stderr-secret"));
+}
+
+#[test]
+fn cli_run_with_fake_acp_invalid_stdout_reports_transcript_path() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    let log_dir = tmp.path().join("acp-logs");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_invalid_stdout(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-invalid\n    args: []\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-invalid\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--acp-log",
+            log_dir.to_str().unwrap(),
+            "--idle-warn",
+            "1",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("ACP transcript"))
+        .stdout(predicate::str::contains(".acp.jsonl"));
+
+    let transcript_files = fs::read_dir(&log_dir)
+        .expect("log dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("log entries");
+    assert_eq!(transcript_files.len(), 1);
+    let transcript = fs::read_to_string(transcript_files[0].path()).expect("transcript readable");
+    assert!(transcript.contains("not-json"));
+    assert!(transcript.contains("<redacted>"));
+    assert!(!transcript.contains("invalid-secret"));
+    assert!(!transcript.contains("bad-secret"));
+}
+
+#[test]
 fn cli_run_acp_requires_configured_agent() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -2029,6 +2146,151 @@ done
 "#,
         )
         .expect("fake acp config written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_transcript(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-transcript.cmd");
+        let ps1_path = bin_dir.join("fake-acp-transcript.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-transcript.ps1\"\r\n",
+        )
+        .expect("fake acp transcript wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+[Console]::Error.WriteLine("Authorization: Bearer stderr-secret ACP_TOKEN=$env:ACP_TOKEN")
+[Console]::Error.Flush()
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{ mcpCapabilities = @{ http = $true; sse = $true } }
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-transcript"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ sessionId = "s1"; configOptions = @() }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp transcript script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-transcript");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+echo "Authorization: Bearer stderr-secret ACP_TOKEN=$ACP_TOKEN" >&2
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"mcpCapabilities\":{\"http\":true,\"sse\":true}},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-transcript\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp transcript written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_invalid_stdout(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-invalid.cmd");
+        let ps1_path = bin_dir.join("fake-acp-invalid.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-invalid.ps1\"\r\n",
+        )
+        .expect("fake acp invalid wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+[Console]::Error.WriteLine("TOKEN=bad-secret")
+[Console]::Error.Flush()
+[Console]::Out.WriteLine("not-json Authorization: Bearer invalid-secret")
+[Console]::Out.Flush()
+Start-Sleep -Milliseconds 100
+"#,
+        )
+        .expect("fake acp invalid script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-invalid");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+echo 'TOKEN=bad-secret' >&2\n\
+echo 'not-json Authorization: Bearer invalid-secret'\n\
+sleep 0.1\n",
+        )
+        .expect("fake acp invalid written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
