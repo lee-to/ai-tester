@@ -41,6 +41,8 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
+        mcp_profile: Option<String>,
+        #[arg(long)]
         filter: Option<String>,
         #[arg(long)]
         dry_run: bool,
@@ -132,6 +134,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             model,
             runtime,
             agent,
+            mcp_profile,
             filter,
             dry_run,
             keep_sandbox,
@@ -146,6 +149,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             model,
             runtime,
             agent,
+            mcp_profile,
             filter,
             dry_run,
             keep_sandbox,

@@ -6,6 +6,8 @@ use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::config::McpServerConfig;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
     pub scenario: String,
@@ -21,6 +23,8 @@ pub struct Scenario {
     pub token_budget: Option<f64>,
     #[serde(default)]
     pub runner: Runner,
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub fixtures: Fixtures,
     #[serde(default)]
@@ -93,6 +97,7 @@ pub struct ScenarioSourceMeta {
     pub runner_model_set: bool,
     pub runner_permission_mode_set: bool,
     pub runner_agent_set: bool,
+    pub runner_mcp_profile_set: bool,
 }
 
 pub fn load_scenario_file(path: impl AsRef<Path>) -> anyhow::Result<LoadedScenario> {
@@ -123,6 +128,9 @@ fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
             .is_some_and(|value| !value.is_null()),
         runner_agent_set: runner
             .and_then(|runner| runner.get("agent"))
+            .is_some_and(|value| !value.is_null()),
+        runner_mcp_profile_set: runner
+            .and_then(|runner| runner.get("mcp_profile"))
             .is_some_and(|value| !value.is_null()),
     }
 }
@@ -166,6 +174,7 @@ pub struct Runner {
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     pub agent: Option<String>,
+    pub mcp_profile: Option<String>,
     pub allowed_tools_override: Option<Vec<String>>,
     pub setting_sources: Option<Vec<String>>,
 }
@@ -177,6 +186,7 @@ impl Default for Runner {
             model: default_model(),
             permission_mode: default_permission_mode(),
             agent: None,
+            mcp_profile: None,
             allowed_tools_override: None,
             setting_sources: None,
         }

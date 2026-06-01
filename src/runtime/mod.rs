@@ -570,6 +570,7 @@ pub struct RuntimeRunRequest {
     pub idle_warn_seconds: u64,
     pub acp_agent_name: Option<String>,
     pub acp_agent: Option<crate::config::AcpAgentConfig>,
+    pub mcp_servers: Vec<crate::config::NamedMcpServerConfig>,
 }
 
 pub fn runtime_ready(name: &str) -> bool {
@@ -1615,6 +1616,7 @@ mod tests {
             idle_warn_seconds: 30,
             acp_agent_name: None,
             acp_agent: None,
+            mcp_servers: Vec::new(),
         };
 
         let args = build_claude_args(&req, 3, None, "do it", true);

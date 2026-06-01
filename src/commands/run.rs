@@ -34,6 +34,7 @@ pub struct RunOptions {
     pub model: Option<String>,
     pub runtime: Option<String>,
     pub agent: Option<String>,
+    pub mcp_profile: Option<String>,
     pub filter: Option<String>,
     pub dry_run: bool,
     pub keep_sandbox: bool,
@@ -173,6 +174,17 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         } else {
             None
         };
+        let mcp_servers = if runtime_name == "acp" {
+            crate::config::resolve_mcp_servers_for_run(
+                &config,
+                &scenario.mcp_servers,
+                scenario.runner.mcp_profile.as_deref(),
+                opts.mcp_profile.as_deref(),
+            )?
+            .servers
+        } else {
+            Vec::new()
+        };
 
         if !silent {
             print_scenario_start(idx + 1, total, &loaded, &scenario, &skill);
@@ -229,6 +241,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             idle_warn_seconds: opts.idle_warn_seconds,
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
+            mcp_servers,
         }) {
             Ok(result) => result,
             Err(err) => {
@@ -587,6 +600,14 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
     if let Some(agent) = opts.agent.clone() {
         scenario.runner.agent = Some(agent);
     }
+    if !loaded.source_meta.runner_mcp_profile_set {
+        if let Some(mcp_profile) = config.defaults.mcp_profile {
+            scenario.runner.mcp_profile = Some(mcp_profile);
+        }
+    }
+    if let Some(mcp_profile) = opts.mcp_profile.clone() {
+        scenario.runner.mcp_profile = Some(mcp_profile);
+    }
     Ok(scenario)
 }
 
@@ -614,6 +635,12 @@ fn print_run_banner(total: usize, opts: &RunOptions) {
     }
     if let Some(agent) = &opts.agent {
         println!("  {}", ui::kv("agent", ui::paint(agent, Tone::Info)));
+    }
+    if let Some(mcp_profile) = &opts.mcp_profile {
+        println!(
+            "  {}",
+            ui::kv("mcp profile", ui::paint(mcp_profile, Tone::Info))
+        );
     }
     if let Some(model) = &opts.model {
         println!("  {}", ui::kv("model", ui::paint(model, Tone::Info)));
@@ -685,6 +712,9 @@ fn print_scenario_dry_run(loaded: &LoadedScenario, scenario: &Scenario) {
     println!("    {}", ui::kv("runtime", &scenario.runner.runtime));
     if let Some(agent) = &scenario.runner.agent {
         println!("    {}", ui::kv("agent", agent));
+    }
+    if let Some(mcp_profile) = &scenario.runner.mcp_profile {
+        println!("    {}", ui::kv("mcp profile", mcp_profile));
     }
     println!("    {}", ui::kv("model", &scenario.runner.model));
     println!(

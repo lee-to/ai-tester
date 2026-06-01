@@ -105,6 +105,24 @@ defaults:
 #     command: gemini
 #     args: ["--experimental-acp"]
 #     env: {}
+
+# Optional MCP registry forwarded to ACP sessions:
+# mcp_servers:
+#   codegraph:
+#     command: mock-codegraph
+#     args: ["--fixture", "graph.json"]
+#     env:
+#       API_TOKEN: secret
+#   docs:
+#     type: http
+#     url: http://127.0.0.1:3001/mcp
+#     headers:
+#       Authorization: Bearer secret
+# mcp_profiles:
+#   mock:
+#     servers: [codegraph]
+#   full:
+#     servers: [codegraph, docs]
 ```
 
 With this file at a project root, skills live at:
@@ -132,6 +150,7 @@ ai-tester run <skill>
 ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
 ai-tester run --dir ./prompts --runtime codex
 
 # Choose output format (default: live events + summary)
@@ -473,9 +492,29 @@ acp_agents:
     command: gemini
     args: ["--experimental-acp"]
     env: {}
+
+mcp_servers:
+  codegraph:
+    command: mock-codegraph
+    args: ["--fixture", "graph.json"]
+    env:
+      API_TOKEN: secret
+  docs:
+    type: http
+    url: http://127.0.0.1:3001/mcp
+    headers:
+      Authorization: Bearer secret
+
+mcp_profiles:
+  mock:
+    servers: [codegraph]
+  full:
+    servers: [codegraph, docs]
 ```
 
-Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, then sends each scripted user prompt through that session. `runner.model` is not sent over ACP in this MVP; pass model or mode flags through the configured `args`.
+Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. `defaults.mcp_profile`, scenario `runner.mcp_profile`, or `ai-tester run --mcp-profile <name>` chooses a profile from `mcp_profiles`; CLI has highest precedence. Scenario-level `mcp_servers` may override or add servers for a single run. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, forwards the effective MCP servers in `session/new.mcpServers`, then sends each scripted user prompt through that session. `runner.model` is not sent over ACP in this MVP; pass model or mode flags through the configured `args`.
+
+Supported MCP transports are stdio (default when `type` is omitted), `http`, and `sse`. Stdio servers use `command`, optional `args`, and optional `env`; HTTP/SSE servers use `url` and optional `headers`. Env and header values are redacted in ai-tester trace diagnostics.
 
 ACP traces count one assistant turn per scripted user prompt sent to the ACP session. This differs from the Claude and Codex adapters, which derive turns from their runtime event streams. As a result, `turn_count_at_most` and explicit `max_turns` limits are comparable within ACP runs but not strictly identical across runtimes.
 

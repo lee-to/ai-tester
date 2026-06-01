@@ -4,9 +4,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    ClientCapabilities, CloseSessionRequest, ContentBlock, CreateTerminalRequest,
-    FileSystemCapabilities, InitializeRequest, KillTerminalRequest, ProtocolVersion,
-    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
+    AgentCapabilities, ClientCapabilities, CloseSessionRequest, ContentBlock,
+    CreateTerminalRequest, EnvVariable, FileSystemCapabilities, HttpHeader, InitializeRequest,
+    KillTerminalRequest, McpServer, McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest,
+    ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, SessionUpdate, StopReason, TerminalOutputRequest, ToolCall,
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest,
@@ -17,7 +18,9 @@ use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, SessionMessag
 use anyhow::Context;
 use serde_json::{Map, Value};
 
-use crate::config::AcpAgentConfig;
+use crate::config::{
+    mcp_servers_diagnostic, AcpAgentConfig, McpServerTransport, NamedMcpServerConfig,
+};
 use crate::scenario::{Runner, UserResponse};
 use crate::trace::{ToolCallRecord, TraceCost, Turn};
 use crate::ui::{self, Tone};
@@ -160,7 +163,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             acp_agent,
             move |connection: ConnectionTo<Agent>| async move {
                 let client_bridge = Arc::clone(&bridge_for_connection);
-                tokio::time::timeout(
+                let initialize_response = tokio::time::timeout(
                     idle_timeout,
                     connection
                         .send_request(
@@ -171,9 +174,18 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                 )
                 .await
                 .map_err(|_| acp_timeout_error("initialize", idle_timeout))??;
+                let mcp_servers = build_acp_mcp_servers(
+                    &req.mcp_servers,
+                    &initialize_response.agent_capabilities,
+                )
+                .map_err(|err| agent_client_protocol::Error::new(-32602, err.to_string()))?;
+                let mcp_diagnostic =
+                    (!req.mcp_servers.is_empty()).then(|| mcp_servers_diagnostic(&req.mcp_servers));
 
+                let session_request =
+                    NewSessionRequest::new(session_cwd.clone()).mcp_servers(mcp_servers);
                 connection
-                    .build_session(&session_cwd)
+                    .build_session_from(session_request)
                     .block_task()
                     .run_until(async move |mut session| {
                         let mut out = RuntimeRunResult::new(max_turns, max_turns_user_set);
@@ -186,6 +198,9 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                             source: "acp".to_string(),
                         };
                         out.session_id = Some(session.session_id().to_string());
+                        if let Some(diagnostic) = mcp_diagnostic {
+                            out.diagnostics.push(diagnostic);
+                        }
                         client_bridge.set_session_id(session.session_id().to_string());
                         let mut progress = req.progress.then(AcpProgress::new);
 
@@ -401,6 +416,82 @@ fn acp_client_capabilities() -> ClientCapabilities {
             .read_text_file(true)
             .write_text_file(true))
         .terminal(true)
+}
+
+fn build_acp_mcp_servers(
+    servers: &[NamedMcpServerConfig],
+    capabilities: &AgentCapabilities,
+) -> anyhow::Result<Vec<McpServer>> {
+    servers
+        .iter()
+        .map(|server| build_acp_mcp_server(server, capabilities))
+        .collect()
+}
+
+fn build_acp_mcp_server(
+    server: &NamedMcpServerConfig,
+    capabilities: &AgentCapabilities,
+) -> anyhow::Result<McpServer> {
+    match server.config.transport {
+        McpServerTransport::Stdio => {
+            let command = server
+                .config
+                .command
+                .as_deref()
+                .with_context(|| format!("MCP server `{}` requires `command`", server.name))?;
+            let env = server
+                .config
+                .env
+                .iter()
+                .map(|(name, value)| EnvVariable::new(name.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            Ok(McpServer::Stdio(
+                McpServerStdio::new(server.name.clone(), command)
+                    .args(server.config.args.clone())
+                    .env(env),
+            ))
+        }
+        McpServerTransport::Http => {
+            if !capabilities.mcp_capabilities.http {
+                anyhow::bail!(
+                    "ACP agent does not advertise HTTP MCP support required by MCP server `{}`",
+                    server.name
+                );
+            }
+            let url = server
+                .config
+                .url
+                .as_deref()
+                .with_context(|| format!("MCP server `{}` requires `url`", server.name))?;
+            Ok(McpServer::Http(
+                McpServerHttp::new(server.name.clone(), url).headers(mcp_headers(&server.config)),
+            ))
+        }
+        McpServerTransport::Sse => {
+            if !capabilities.mcp_capabilities.sse {
+                anyhow::bail!(
+                    "ACP agent does not advertise SSE MCP support required by MCP server `{}`",
+                    server.name
+                );
+            }
+            let url = server
+                .config
+                .url
+                .as_deref()
+                .with_context(|| format!("MCP server `{}` requires `url`", server.name))?;
+            Ok(McpServer::Sse(
+                McpServerSse::new(server.name.clone(), url).headers(mcp_headers(&server.config)),
+            ))
+        }
+    }
+}
+
+fn mcp_headers(config: &crate::config::McpServerConfig) -> Vec<HttpHeader> {
+    config
+        .headers
+        .iter()
+        .map(|(name, value)| HttpHeader::new(name.clone(), value.clone()))
+        .collect()
 }
 
 fn terminal_wait_timeout(idle_timeout: Duration) -> Duration {
@@ -934,10 +1025,11 @@ impl Drop for CurrentDirGuard {
 #[cfg(test)]
 mod tests {
     use agent_client_protocol::schema::{
-        PermissionOption, PermissionOptionKind, ToolCallId, ToolCallUpdateFields,
+        McpCapabilities, PermissionOption, PermissionOptionKind, ToolCallId, ToolCallUpdateFields,
     };
 
     use super::*;
+    use crate::config::McpServerConfig;
 
     fn permission_request() -> RequestPermissionRequest {
         RequestPermissionRequest::new(
@@ -1044,6 +1136,62 @@ mod tests {
             decision.outcome,
             RequestPermissionOutcome::Selected(selected) if selected.option_id.to_string() == "allow"
         ));
+    }
+
+    #[test]
+    fn acp_mcp_builder_rejects_http_without_agent_capability() {
+        let server = NamedMcpServerConfig {
+            name: "docs".to_string(),
+            config: McpServerConfig {
+                transport: McpServerTransport::Http,
+                url: Some("http://127.0.0.1:3001/mcp".to_string()),
+                ..McpServerConfig::default()
+            },
+        };
+        let err = build_acp_mcp_servers(&[server], &AgentCapabilities::default())
+            .expect_err("http MCP requires agent capability");
+
+        assert!(err.to_string().contains("HTTP MCP support"));
+    }
+
+    #[test]
+    fn acp_mcp_builder_converts_stdio_http_and_sse_servers() {
+        let servers = vec![
+            NamedMcpServerConfig {
+                name: "codegraph".to_string(),
+                config: McpServerConfig {
+                    command: Some("mock-codegraph".to_string()),
+                    args: vec!["--fixture".to_string()],
+                    env: [("API_TOKEN".to_string(), "secret".to_string())].into(),
+                    ..McpServerConfig::default()
+                },
+            },
+            NamedMcpServerConfig {
+                name: "docs".to_string(),
+                config: McpServerConfig {
+                    transport: McpServerTransport::Http,
+                    url: Some("http://127.0.0.1:3001/mcp".to_string()),
+                    headers: [("Authorization".to_string(), "Bearer secret".to_string())].into(),
+                    ..McpServerConfig::default()
+                },
+            },
+            NamedMcpServerConfig {
+                name: "events".to_string(),
+                config: McpServerConfig {
+                    transport: McpServerTransport::Sse,
+                    url: Some("http://127.0.0.1:3002/events".to_string()),
+                    ..McpServerConfig::default()
+                },
+            },
+        ];
+        let capabilities =
+            AgentCapabilities::new().mcp_capabilities(McpCapabilities::new().http(true).sse(true));
+
+        let converted = build_acp_mcp_servers(&servers, &capabilities).expect("converts");
+
+        assert!(matches!(converted[0], McpServer::Stdio(_)));
+        assert!(matches!(converted[1], McpServer::Http(_)));
+        assert!(matches!(converted[2], McpServer::Sse(_)));
     }
 
     #[cfg(windows)]

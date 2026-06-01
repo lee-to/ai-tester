@@ -1,5 +1,7 @@
 use ai_tester::assertions::{compute_weighted_score, evaluate_assertions};
-use ai_tester::config::load_project_config;
+use ai_tester::config::{
+    load_project_config, mcp_servers_diagnostic, resolve_mcp_servers_for_run, McpServerTransport,
+};
 use ai_tester::runtime::{
     parse_claude_jsonl, parse_claude_jsonl_with_user_responses, parse_codex_jsonl,
     runtime_status_for_scenario,
@@ -186,6 +188,145 @@ fn project_config_parses_acp_agent_registry_and_default_agent() {
     assert_eq!(local.command, "fake-acp");
     assert_eq!(local.args, vec!["--stdio"]);
     assert_eq!(local.env.get("ACP_FLAG").map(String::as_str), Some("1"));
+}
+
+#[test]
+fn project_config_parses_mcp_servers_profiles_and_resolves_precedence() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        r#"skills_dir: ./skills
+defaults:
+  runtime: acp
+  agent: local
+  mcp_profile: mock
+acp_agents:
+  local:
+    command: fake-acp
+mcp_servers:
+  codegraph:
+    command: project-codegraph
+    args: [--project]
+    env:
+      API_TOKEN: project-secret
+  docs:
+    type: http
+    url: http://127.0.0.1:3001/mcp
+    headers:
+      Authorization: Bearer project-secret
+  events:
+    type: sse
+    url: http://127.0.0.1:3002/events
+mcp_profiles:
+  mock:
+    servers: [codegraph]
+  full:
+    servers: [codegraph, docs, events]
+"#,
+    )
+    .expect("config written");
+
+    let config = load_project_config(tmp.path()).expect("config loads");
+    assert_eq!(config.defaults.mcp_profile.as_deref(), Some("mock"));
+    assert_eq!(
+        config
+            .mcp_servers
+            .get("docs")
+            .expect("docs server")
+            .transport,
+        McpServerTransport::Http
+    );
+
+    let scenario = Scenario::from_yaml_str(
+        r#"scenario: mcp
+system_prompt: Body
+runner:
+  runtime: acp
+  agent: local
+  mcp_profile: full
+mcp_servers:
+  codegraph:
+    command: scenario-codegraph
+    args: [--scenario-fixture]
+    env:
+      API_TOKEN: scenario-secret
+  scenario_only:
+    command: scenario-only
+"#,
+    )
+    .expect("scenario parses");
+
+    let resolved = resolve_mcp_servers_for_run(
+        &config,
+        &scenario.mcp_servers,
+        scenario.runner.mcp_profile.as_deref(),
+        None,
+    )
+    .expect("mcp servers resolve");
+    let names = resolved
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["codegraph", "docs", "events", "scenario_only"]);
+    assert_eq!(
+        resolved.servers[0].config.command.as_deref(),
+        Some("scenario-codegraph")
+    );
+
+    let cli_resolved = resolve_mcp_servers_for_run(
+        &config,
+        &scenario.mcp_servers,
+        scenario.runner.mcp_profile.as_deref(),
+        Some("mock"),
+    )
+    .expect("cli profile wins");
+    let cli_names = cli_resolved
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(cli_names, vec!["codegraph", "scenario_only"]);
+
+    let diagnostic = mcp_servers_diagnostic(&resolved.servers);
+    assert!(diagnostic.contains("API_TOKEN"));
+    assert!(diagnostic.contains("<redacted>"));
+    assert!(!diagnostic.contains("scenario-secret"));
+    assert!(!diagnostic.contains("project-secret"));
+    assert!(!diagnostic.contains("Bearer project-secret"));
+}
+
+#[test]
+fn mcp_server_resolution_rejects_unknown_profile_and_missing_required_fields() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        r#"mcp_servers:
+  missing_command:
+    args: [--no-command]
+mcp_profiles:
+  bad:
+    servers: [does_not_exist]
+"#,
+    )
+    .expect("config written");
+    let config = load_project_config(tmp.path()).expect("config loads");
+    let scenario =
+        Scenario::from_yaml_str("scenario: mcp\nsystem_prompt: Body\n").expect("scenario parses");
+
+    let unknown_profile =
+        resolve_mcp_servers_for_run(&config, &scenario.mcp_servers, None, Some("unknown"))
+            .expect_err("unknown profile rejected");
+    assert!(unknown_profile.to_string().contains("unknown MCP profile"));
+
+    let unknown_server =
+        resolve_mcp_servers_for_run(&config, &scenario.mcp_servers, None, Some("bad"))
+            .expect_err("unknown active server rejected");
+    assert!(unknown_server.to_string().contains("unknown MCP server"));
+
+    let missing_command = resolve_mcp_servers_for_run(&config, &scenario.mcp_servers, None, None)
+        .expect_err("missing stdio command rejected");
+    assert!(missing_command.to_string().contains("requires `command`"));
 }
 
 #[test]

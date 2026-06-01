@@ -754,6 +754,120 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
 }
 
 #[test]
+fn cli_run_with_fake_acp_forwards_mcp_profiles_and_redacts_trace() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_mcp_forwarding(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        r#"skills_dir: ./skills
+defaults:
+  runtime: acp
+  agent: local
+  mcp_profile: mock
+acp_agents:
+  local:
+    command: fake-acp-mcp
+    args: []
+mcp_servers:
+  codegraph:
+    command: project-codegraph
+    args: [--project]
+    env:
+      API_TOKEN: project-secret
+  docs:
+    type: http
+    url: http://127.0.0.1:3001/project
+    headers:
+      Authorization: Bearer project-secret
+  events:
+    type: sse
+    url: http://127.0.0.1:3002/events
+mcp_profiles:
+  mock:
+    servers: [codegraph]
+  full:
+    servers: [codegraph, docs, events]
+    mcp_servers:
+      docs:
+        type: http
+        url: http://127.0.0.1:3001/profile
+        headers:
+          Authorization: Bearer profile-secret
+"#,
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        r#"scenario: fake-acp-mcp
+system_prompt: You are helpful.
+runner:
+  runtime: acp
+  agent: local
+mcp_servers:
+  codegraph:
+    command: scenario-codegraph
+    args: [--scenario-fixture]
+    env:
+      API_TOKEN: scenario-secret
+  scenario_only:
+    command: scenario-only
+assertions:
+  - id: says-done
+    type: output_contains
+    pattern: done
+"#,
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+
+    let mut default_profile = Command::cargo_bin("ai-tester").expect("binary");
+    default_profile
+        .current_dir(tmp.path())
+        .env("PATH", &new_path)
+        .env("EXPECTED_MCP_PROFILE", "mock")
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let mut full_profile = Command::cargo_bin("ai-tester").expect("binary");
+    full_profile
+        .current_dir(tmp.path())
+        .env("PATH", &new_path)
+        .env("EXPECTED_MCP_PROFILE", "full")
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--quiet",
+            "--mcp-profile",
+            "full",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let trace_dir = tmp.path().join("runs/inline_fake-acp-mcp");
+    let trace_json = fs::read_dir(&trace_dir)
+        .expect("trace dir")
+        .map(|entry| fs::read_to_string(entry.expect("entry").path()).expect("trace readable"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(trace_json.contains("ACP MCP servers"));
+    assert!(trace_json.contains("<redacted>"));
+    assert!(!trace_json.contains("scenario-secret"));
+    assert!(!trace_json.contains("project-secret"));
+    assert!(!trace_json.contains("profile-secret"));
+    assert!(!trace_json.contains("Bearer profile-secret"));
+}
+
+#[test]
 fn cli_run_acp_requires_configured_agent() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1437,6 +1551,185 @@ done
 "#,
         )
         .expect("fake acp capabilities written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_mcp_forwarding(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-mcp.cmd");
+        let ps1_path = bin_dir.join("fake-acp-mcp.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-mcp.ps1\"\r\n",
+        )
+        .expect("fake acp mcp wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+function Fail-Request($id, $message) {
+    Write-Json @{
+        jsonrpc = "2.0"
+        id = $id
+        error = @{ code = -32000; message = $message }
+    }
+    exit 0
+}
+
+function Find-Server($servers, $name) {
+    @($servers) | Where-Object { $_.name -eq $name } | Select-Object -First 1
+}
+
+function Has-Env($server, $name, $value) {
+    $null -ne (@($server.env) | Where-Object { $_.name -eq $name -and $_.value -eq $value } | Select-Object -First 1)
+}
+
+function Has-Header($server, $name, $value) {
+    $null -ne (@($server.headers) | Where-Object { $_.name -eq $name -and $_.value -eq $value } | Select-Object -First 1)
+}
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{ mcpCapabilities = @{ http = $true; sse = $true } }
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-mcp"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        $servers = @($message.params.mcpServers)
+        $expected = $env:EXPECTED_MCP_PROFILE
+        $codegraph = Find-Server $servers "codegraph"
+        $scenarioOnly = Find-Server $servers "scenario_only"
+        if ($null -eq $codegraph -or $codegraph.command -ne "scenario-codegraph" -or -not (Has-Env $codegraph "API_TOKEN" "scenario-secret")) {
+            Fail-Request $message.id "missing scenario codegraph MCP server"
+        }
+        if ($null -eq $scenarioOnly -or $scenarioOnly.command -ne "scenario-only") {
+            Fail-Request $message.id "missing scenario-only MCP server"
+        }
+        if ($expected -eq "mock") {
+            if ($servers.Count -ne 2 -or $null -ne (Find-Server $servers "docs") -or $null -ne (Find-Server $servers "events")) {
+                Fail-Request $message.id "mock profile should only include codegraph and scenario_only"
+            }
+        } elseif ($expected -eq "full") {
+            $docs = Find-Server $servers "docs"
+            $events = Find-Server $servers "events"
+            if ($servers.Count -ne 4 -or $null -eq $docs -or $docs.type -ne "http" -or $docs.url -ne "http://127.0.0.1:3001/profile" -or -not (Has-Header $docs "Authorization" "Bearer profile-secret")) {
+                Fail-Request $message.id "full profile should include profile-overridden docs"
+            }
+            if ($null -eq $events -or $events.type -ne "sse" -or $events.url -ne "http://127.0.0.1:3002/events") {
+                Fail-Request $message.id "full profile should include events"
+            }
+        } else {
+            Fail-Request $message.id "EXPECTED_MCP_PROFILE is not set"
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ sessionId = "s1"; configOptions = @() }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp mcp script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-mcp");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+fail_request() {
+  id="$1"
+  message="$2"
+  echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"$message\"}}"
+  exit 0
+}
+
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"mcpCapabilities\":{\"http\":true,\"sse\":true}},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-mcp\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      case "$line" in
+        *'"name":"codegraph"'*'"command":"scenario-codegraph"'*'"name":"API_TOKEN","value":"scenario-secret"'*) ;;
+        *) fail_request "$id" "missing scenario codegraph MCP server" ;;
+      esac
+      case "$line" in
+        *'"name":"scenario_only"'*'"command":"scenario-only"'*) ;;
+        *) fail_request "$id" "missing scenario-only MCP server" ;;
+      esac
+      if [ "$EXPECTED_MCP_PROFILE" = "mock" ]; then
+        case "$line" in
+          *'"name":"docs"'*|*'"name":"events"'*) fail_request "$id" "mock profile should exclude docs/events" ;;
+        esac
+      elif [ "$EXPECTED_MCP_PROFILE" = "full" ]; then
+        case "$line" in
+          *'"type":"http"'*'"name":"docs"'*'"url":"http://127.0.0.1:3001/profile"'*'"name":"Authorization","value":"Bearer profile-secret"'*) ;;
+          *) fail_request "$id" "full profile should include profile-overridden docs" ;;
+        esac
+        case "$line" in
+          *'"type":"sse"'*'"name":"events"'*'"url":"http://127.0.0.1:3002/events"'*) ;;
+          *) fail_request "$id" "full profile should include events" ;;
+        esac
+      else
+        fail_request "$id" "EXPECTED_MCP_PROFILE is not set"
+      fi
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp mcp written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
