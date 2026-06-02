@@ -239,6 +239,25 @@ fn fixtures_setup_timeout_seconds_parses() {
 }
 
 #[test]
+fn runner_acp_turn_timeout_seconds_parses() {
+    let scenario = Scenario::from_yaml_str(
+        "scenario: acp-turn-timeout\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  acp_turn_timeout_seconds: 45\n",
+    )
+    .expect("scenario parses");
+    assert_eq!(scenario.runner.acp_turn_timeout_seconds, Some(45));
+}
+
+#[test]
+fn runner_acp_turn_timeout_rejects_zero() {
+    let err = Scenario::from_yaml_str(
+        "scenario: acp-turn-timeout-zero\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  acp_turn_timeout_seconds: 0\n",
+    )
+    .expect_err("zero ACP turn timeout rejected");
+    assert!(err.to_string().contains("runner.acp_turn_timeout_seconds"));
+    assert!(err.to_string().contains("positive"));
+}
+
+#[test]
 fn scenario_validation_rejects_invalid_assertion_ids_weights_and_limits() {
     let cases = [
         (
@@ -441,6 +460,34 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     assert_eq!(config.defaults.mode.as_deref(), Some("review"));
     assert_eq!(config.defaults.reasoning.as_deref(), Some("high"));
     assert_eq!(config.defaults.setup_timeout_seconds, Some(12));
+}
+
+#[test]
+fn project_config_parses_acp_turn_timeout_default() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "defaults:\n  acp_turn_timeout_seconds: 90\n",
+    )
+    .expect("config written");
+
+    let config = load_project_config(tmp.path()).expect("config loads");
+    assert_eq!(config.defaults.acp_turn_timeout_seconds, Some(90));
+}
+
+#[test]
+fn project_config_rejects_zero_acp_turn_timeout() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "defaults:\n  acp_turn_timeout_seconds: 0\n",
+    )
+    .expect("config written");
+
+    let err = load_project_config(tmp.path()).expect_err("zero ACP turn timeout rejected");
+    let message = err.to_string();
+    assert!(message.contains("defaults.acp_turn_timeout_seconds"));
+    assert!(message.contains("positive"));
 }
 
 #[test]

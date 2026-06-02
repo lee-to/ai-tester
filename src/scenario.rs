@@ -71,6 +71,9 @@ impl Scenario {
         if self.fixtures.setup_timeout_seconds == Some(0) {
             bail!("fixtures.setup_timeout_seconds must be positive");
         }
+        if self.runner.acp_turn_timeout_seconds == Some(0) {
+            bail!("runner.acp_turn_timeout_seconds must be positive");
+        }
         if !self.fixtures.git_init {
             if self.fixtures.git_branch.is_some() {
                 bail!("fixtures.git_branch requires fixtures.git_init: true");
@@ -208,6 +211,7 @@ pub struct Runner {
     pub permission_mode: String,
     pub agent: Option<String>,
     pub mcp_profile: Option<String>,
+    pub acp_turn_timeout_seconds: Option<u64>,
     pub allowed_tools_override: Option<Vec<String>>,
     pub setting_sources: Option<Vec<String>>,
 }
@@ -222,6 +226,7 @@ impl Default for Runner {
             permission_mode: default_permission_mode(),
             agent: None,
             mcp_profile: None,
+            acp_turn_timeout_seconds: None,
             allowed_tools_override: None,
             setting_sources: None,
         }

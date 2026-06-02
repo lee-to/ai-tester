@@ -47,12 +47,16 @@ pub struct RunOptions {
     pub quiet: bool,
     pub idle_warn_seconds: u64,
     pub setup_timeout_seconds: Option<u64>,
+    pub acp_turn_timeout_seconds: Option<u64>,
     pub format: OutputFormat,
 }
 
 pub fn run_command(opts: RunOptions) -> anyhow::Result<i32> {
     if opts.setup_timeout_seconds == Some(0) {
         anyhow::bail!("setup timeout must be positive");
+    }
+    if opts.acp_turn_timeout_seconds == Some(0) {
+        anyhow::bail!("ACP turn timeout must be positive");
     }
     if opts.dry_run {
         return run_dry_run(opts);
@@ -154,6 +158,8 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         let runtime_name = scenario.runner.runtime.clone();
         let config = load_project_config(std::env::current_dir()?)?;
         let setup_timeout = effective_setup_timeout(&opts, &config, &scenario);
+        let acp_turn_timeout_seconds =
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario);
         let runtime_status = crate::runtime::runtime_status_for_scenario(&scenario, &config);
         if !runtime_status.ready {
             if !silent {
@@ -267,6 +273,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .map(|p| p.to_string_lossy().to_string()),
             progress: verbose,
             idle_warn_seconds: opts.idle_warn_seconds,
+            acp_turn_timeout_seconds,
             scenario_env: scenario.fixtures.env.clone(),
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
@@ -375,6 +382,17 @@ fn effective_setup_timeout(
         .or(config.defaults.setup_timeout_seconds)
         .unwrap_or(crate::config::DEFAULT_SETUP_TIMEOUT_SECONDS);
     Duration::from_secs(seconds)
+}
+
+fn effective_acp_turn_timeout_seconds(
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> u64 {
+    opts.acp_turn_timeout_seconds
+        .or(scenario.runner.acp_turn_timeout_seconds)
+        .or(config.defaults.acp_turn_timeout_seconds)
+        .unwrap_or(crate::config::DEFAULT_ACP_TURN_TIMEOUT_SECONDS)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1162,6 +1180,7 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
             max_turns_user_set: runtime_result.max_turns_user_set,
             turns_used: runtime_result.turns_used,
             hit_max_turns,
+            stopped_reason: runtime_result.stopped_reason,
             session_id: runtime_result.session_id,
             sandbox_path,
         },
@@ -1429,6 +1448,60 @@ mod tests {
             message: "boom".to_string(),
         });
         record
+    }
+
+    fn project_config_with_acp_turn_timeout(timeout: Option<u64>) -> crate::config::ProjectConfig {
+        crate::config::ProjectConfig {
+            root_dir: PathBuf::new(),
+            config_path: None,
+            skills_dir: PathBuf::from("skills"),
+            runs_dir: PathBuf::from("runs"),
+            defaults: crate::config::ProjectDefaults {
+                acp_turn_timeout_seconds: timeout,
+                ..Default::default()
+            },
+            acp_agents: Default::default(),
+            mcp_servers: Default::default(),
+            mcp_profiles: Default::default(),
+        }
+    }
+
+    #[test]
+    fn acp_turn_timeout_precedence_is_cli_scenario_project_default() {
+        let config = project_config_with_acp_turn_timeout(Some(30));
+        let scenario = Scenario::from_yaml_str(
+            "scenario: acp-timeout\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  acp_turn_timeout_seconds: 20\n",
+        )
+        .expect("scenario parses");
+        let opts = RunOptions {
+            acp_turn_timeout_seconds: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            10
+        );
+
+        let opts = RunOptions::default();
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            20
+        );
+
+        let scenario = Scenario::from_yaml_str(
+            "scenario: acp-timeout\nsystem_prompt: Body\nrunner:\n  runtime: acp\n",
+        )
+        .expect("scenario parses");
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            30
+        );
+
+        let config = project_config_with_acp_turn_timeout(None);
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            crate::config::DEFAULT_ACP_TURN_TIMEOUT_SECONDS
+        );
     }
 
     #[test]

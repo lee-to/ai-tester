@@ -2,11 +2,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    AgentCapabilities, ClientCapabilities, CloseSessionRequest, ContentBlock,
+    AgentCapabilities, CancelNotification, ClientCapabilities, CloseSessionRequest, ContentBlock,
     CreateTerminalRequest, EnvVariable, FileSystemCapabilities, HttpHeader, InitializeRequest,
     KillTerminalRequest, McpServer, McpServerHttp, McpServerSse, McpServerStdio, NewSessionRequest,
     ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
@@ -19,7 +20,9 @@ use agent_client_protocol::schema::{
     ToolCallStatus, ToolCallUpdate, ToolKind, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::util::MatchDispatch;
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, LineDirection, SessionMessage};
+use agent_client_protocol::{
+    Agent, Client, ConnectTo, ConnectionTo, LineDirection, Lines, SessionMessage,
+};
 use anyhow::Context;
 use serde_json::{Map, Value};
 
@@ -28,7 +31,7 @@ use crate::config::{
     NamedMcpServerConfig, ResolvedAcpAgent,
 };
 use crate::scenario::{Runner, UserResponse};
-use crate::trace::{ToolCallRecord, TraceCost, Turn};
+use crate::trace::{ToolCallRecord, TraceCost, TraceError, Turn};
 use crate::ui::{self, Tone};
 use crate::util::redaction::Redactor;
 use crate::util::regex::compile_pattern;
@@ -77,6 +80,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let session_cwd = acp_session_cwd(&process_cwd);
     let user_messages = build_acp_user_messages(&req);
     let idle_timeout = Duration::from_secs(req.idle_warn_seconds.max(1));
+    let acp_turn_timeout = Duration::from_secs(req.acp_turn_timeout_seconds.max(1));
     let client_bridge = Arc::new(AcpClientBridge::new(
         process_cwd.clone(),
         terminal_wait_timeout(idle_timeout),
@@ -243,6 +247,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                 let mut progress = req.progress.then(AcpProgress::new);
 
                 let user_message_count = user_messages.len();
+                let mut session_closed = false;
                 for (message_index, user_message) in user_messages.into_iter().enumerate() {
                     if out.turns_used >= max_turns {
                         out.stopped_reason = "max_turns".to_string();
@@ -260,34 +265,59 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                     out.turns_used += 1;
 
                     session.send_prompt(user_message)?;
+                    let turn_deadline = tokio::time::Instant::now() + acp_turn_timeout;
                     loop {
-                        let message = tokio::time::timeout(idle_timeout, session.read_update())
-                            .await
-                            .map_err(|_| acp_timeout_error("session update", idle_timeout))??;
-                        match message {
-                            SessionMessage::SessionMessage(dispatch) => {
-                                MatchDispatch::new(dispatch)
-                                    .if_notification(async |notification: SessionNotification| {
-                                        if let Some(progress) = &mut progress {
-                                            progress.print_update(&notification.update);
-                                        }
-                                        apply_session_update(notification.update, &mut out);
-                                        flush_bridge_tool_calls(&client_bridge, &mut out);
-                                        Ok(())
-                                    })
-                                    .await
-                                    .otherwise_ignore()?;
-                            }
-                            SessionMessage::StopReason(reason) => {
-                                out.stopped_reason = stop_reason_to_string(reason);
-                                flush_bridge_tool_calls(&client_bridge, &mut out);
-                                if let Some(progress) = &mut progress {
-                                    progress.stop_reason(&out.stopped_reason);
+                        let Some(update_timeout) =
+                            next_acp_update_timeout(turn_deadline, idle_timeout)
+                        else {
+                            handle_acp_turn_timeout(
+                                &mut session,
+                                &client_bridge,
+                                &mut out,
+                                &mut progress,
+                                acp_turn_timeout,
+                                idle_timeout,
+                            )
+                            .await?;
+                            session_closed = true;
+                            break;
+                        };
+                        let message =
+                            match tokio::time::timeout(update_timeout, session.read_update()).await
+                            {
+                                Ok(message) => message?,
+                                Err(_) if tokio::time::Instant::now() >= turn_deadline => {
+                                    handle_acp_turn_timeout(
+                                        &mut session,
+                                        &client_bridge,
+                                        &mut out,
+                                        &mut progress,
+                                        acp_turn_timeout,
+                                        idle_timeout,
+                                    )
+                                    .await?;
+                                    session_closed = true;
+                                    break;
                                 }
-                                break;
-                            }
-                            _ => {}
+                                Err(_) => {
+                                    return Err(acp_timeout_error("session update", idle_timeout));
+                                }
+                            };
+                        if apply_acp_session_message(
+                            message,
+                            &client_bridge,
+                            &mut out,
+                            &mut progress,
+                        )
+                        .await?
+                        .is_some()
+                        {
+                            break;
                         }
+                    }
+
+                    if session_closed {
+                        break;
                     }
 
                     if out.turns_used >= max_turns && message_index + 1 < user_message_count {
@@ -296,14 +326,14 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                     }
                 }
 
-                let close_request = session
-                    .connection()
-                    .send_request_to(
-                        Agent,
-                        CloseSessionRequest::new(session.session_id().clone()),
+                if !session_closed {
+                    let _ = close_acp_session(
+                        &session.connection(),
+                        session.session_id().clone(),
+                        idle_timeout,
                     )
-                    .block_task();
-                let _ = tokio::time::timeout(idle_timeout, close_request).await;
+                    .await;
+                }
                 flush_bridge_tool_calls(&client_bridge, &mut out);
 
                 if out.stopped_reason == "other" && out.errors.is_empty() {
@@ -1153,12 +1183,413 @@ fn terminal_wait_timeout(idle_timeout: Duration) -> Duration {
     }
 }
 
+/// ACP stdio transport with an owned child handle, so timeout cleanup can kill wrappers too.
+struct ManagedAcpAgent {
+    server: McpServer,
+    debug_callback: Option<Arc<dyn Fn(&str, LineDirection) + Send + Sync + 'static>>,
+}
+
+impl ManagedAcpAgent {
+    fn new(server: McpServer) -> Self {
+        Self {
+            server,
+            debug_callback: None,
+        }
+    }
+
+    fn with_debug<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, LineDirection) + Send + Sync + 'static,
+    {
+        self.debug_callback = Some(Arc::new(callback));
+        self
+    }
+
+    fn spawn_process(
+        &self,
+    ) -> Result<
+        (
+            async_process::ChildStdin,
+            async_process::ChildStdout,
+            async_process::ChildStderr,
+            async_process::Child,
+        ),
+        agent_client_protocol::Error,
+    > {
+        match &self.server {
+            McpServer::Stdio(stdio) => {
+                let mut cmd = async_process::Command::new(&stdio.command);
+                cmd.args(&stdio.args);
+                for env_var in &stdio.env {
+                    cmd.env(&env_var.name, &env_var.value);
+                }
+                cmd.stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+
+                let mut child = cmd
+                    .spawn()
+                    .map_err(agent_client_protocol::Error::into_internal_error)?;
+                let child_stdin = child.stdin.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stdin")
+                })?;
+                let child_stdout = child.stdout.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stdout")
+                })?;
+                let child_stderr = child.stderr.take().ok_or_else(|| {
+                    agent_client_protocol::util::internal_error("Failed to open stderr")
+                })?;
+
+                Ok((child_stdin, child_stdout, child_stderr, child))
+            }
+            McpServer::Http(_) => Err(agent_client_protocol::util::internal_error(
+                "HTTP transport not supported for ACP agent process",
+            )),
+            McpServer::Sse(_) => Err(agent_client_protocol::util::internal_error(
+                "SSE transport not supported for ACP agent process",
+            )),
+            _ => Err(agent_client_protocol::util::internal_error(
+                "Unknown ACP agent transport type",
+            )),
+        }
+    }
+}
+
+impl ConnectTo<Client> for ManagedAcpAgent {
+    async fn connect_to(
+        self,
+        client: impl ConnectTo<Agent>,
+    ) -> Result<(), agent_client_protocol::Error> {
+        use futures::io::BufReader;
+        use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
+
+        let (child_stdin, child_stdout, child_stderr, child) = self.spawn_process()?;
+        let (stderr_tx, stderr_rx) = futures::channel::oneshot::channel::<String>();
+
+        let debug_callback = self.debug_callback.clone();
+        let stderr_future = async move {
+            let stderr_reader = BufReader::new(child_stderr);
+            let mut stderr_lines = stderr_reader.lines();
+            let mut collected = String::new();
+            while let Some(line_result) = stderr_lines.next().await {
+                if let Ok(line) = line_result {
+                    if let Some(ref callback) = debug_callback {
+                        callback(&line, LineDirection::Stderr);
+                    }
+                    if !collected.is_empty() {
+                        collected.push('\n');
+                    }
+                    collected.push_str(&line);
+                }
+            }
+            drop(stderr_tx.send(collected));
+        };
+
+        let child_monitor = monitor_managed_child(child, stderr_rx);
+
+        let incoming_lines: std::pin::Pin<
+            Box<dyn futures::Stream<Item = std::io::Result<String>> + Send>,
+        > = if let Some(callback) = self.debug_callback.clone() {
+            Box::pin(BufReader::new(child_stdout).lines().inspect(move |result| {
+                if let Ok(line) = result {
+                    callback(line, LineDirection::Stdout);
+                }
+            }))
+        } else {
+            Box::pin(BufReader::new(child_stdout).lines())
+        };
+
+        let outgoing_sink: std::pin::Pin<
+            Box<dyn futures::Sink<String, Error = std::io::Error> + Send>,
+        > = if let Some(callback) = self.debug_callback.clone() {
+            Box::pin(futures::sink::unfold(
+                (child_stdin, callback),
+                async move |(mut writer, callback), line: String| {
+                    callback(&line, LineDirection::Stdin);
+                    let mut bytes = line.into_bytes();
+                    bytes.push(b'\n');
+                    writer.write_all(&bytes).await?;
+                    Ok::<_, std::io::Error>((writer, callback))
+                },
+            ))
+        } else {
+            Box::pin(futures::sink::unfold(
+                child_stdin,
+                async move |mut writer, line: String| {
+                    let mut bytes = line.into_bytes();
+                    bytes.push(b'\n');
+                    writer.write_all(&bytes).await?;
+                    Ok::<_, std::io::Error>(writer)
+                },
+            ))
+        };
+
+        let protocol_future =
+            ConnectTo::<Client>::connect_to(Lines::new(outgoing_sink, incoming_lines), client);
+
+        let stderr_future = pin!(stderr_future);
+        let protocol_future = pin!(protocol_future);
+        let child_monitor = pin!(child_monitor);
+
+        let main_race = async {
+            match futures::future::select(protocol_future, child_monitor).await {
+                futures::future::Either::Left((result, _))
+                | futures::future::Either::Right((result, _)) => result,
+            }
+        };
+        let main_race = pin!(main_race);
+        match futures::future::select(main_race, stderr_future).await {
+            futures::future::Either::Left((result, _)) => result,
+            futures::future::Either::Right(((), protocol)) => protocol.await,
+        }
+    }
+}
+
+struct ManagedChildGuard {
+    child: async_process::Child,
+    pid: u32,
+    exited: bool,
+}
+
+impl ManagedChildGuard {
+    fn new(child: async_process::Child) -> Self {
+        let pid = child.id();
+        Self {
+            child,
+            pid,
+            exited: false,
+        }
+    }
+
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.child.status().await;
+        if status.is_ok() {
+            self.exited = true;
+        }
+        status
+    }
+}
+
+impl Drop for ManagedChildGuard {
+    fn drop(&mut self) {
+        if !self.exited {
+            kill_process_tree(self.pid);
+            let _ = self.child.kill();
+        }
+    }
+}
+
+async fn monitor_managed_child(
+    child: async_process::Child,
+    stderr_rx: futures::channel::oneshot::Receiver<String>,
+) -> Result<(), agent_client_protocol::Error> {
+    let mut guard = ManagedChildGuard::new(child);
+    let status = guard.wait().await.map_err(|err| {
+        agent_client_protocol::util::internal_error(format!("Failed to wait for process: {err}"))
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        let stderr = stderr_rx.await.unwrap_or_default();
+        let message = if stderr.is_empty() {
+            format!("Process exited with {status}")
+        } else {
+            format!("Process exited with {status}: {stderr}")
+        };
+        Err(agent_client_protocol::util::internal_error(message))
+    }
+}
+
+fn kill_process_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+    #[cfg(not(windows))]
+    {
+        let group = format!("-{pid}");
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &group])
+            .status();
+        std::thread::sleep(Duration::from_millis(100));
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &group])
+            .status();
+    }
+}
+
 fn flush_bridge_tool_calls(bridge: &AcpClientBridge, out: &mut RuntimeRunResult) {
     let calls = bridge.drain_tool_calls();
     if calls.is_empty() {
         return;
     }
     current_turn_mut(out).tool_calls.extend(calls);
+}
+
+async fn apply_acp_session_message(
+    message: SessionMessage,
+    client_bridge: &AcpClientBridge,
+    out: &mut RuntimeRunResult,
+    progress: &mut Option<AcpProgress>,
+) -> Result<Option<String>, agent_client_protocol::Error> {
+    match message {
+        SessionMessage::SessionMessage(dispatch) => {
+            MatchDispatch::new(dispatch)
+                .if_notification(async |notification: SessionNotification| {
+                    if let Some(progress) = progress {
+                        progress.print_update(&notification.update);
+                    }
+                    apply_session_update(notification.update, out);
+                    flush_bridge_tool_calls(client_bridge, out);
+                    Ok(())
+                })
+                .await
+                .otherwise_ignore()?;
+            Ok(None)
+        }
+        SessionMessage::StopReason(reason) => {
+            out.stopped_reason = stop_reason_to_string(reason);
+            flush_bridge_tool_calls(client_bridge, out);
+            if let Some(progress) = progress {
+                progress.stop_reason(&out.stopped_reason);
+            }
+            Ok(Some(out.stopped_reason.clone()))
+        }
+        _ => Ok(None),
+    }
+}
+
+async fn handle_acp_turn_timeout<Link>(
+    session: &mut agent_client_protocol::ActiveSession<'_, Link>,
+    client_bridge: &AcpClientBridge,
+    out: &mut RuntimeRunResult,
+    progress: &mut Option<AcpProgress>,
+    turn_timeout: Duration,
+    idle_timeout: Duration,
+) -> Result<(), agent_client_protocol::Error>
+where
+    Link: agent_client_protocol::role::HasPeer<Agent>,
+{
+    let session_id = session.session_id().clone();
+    out.stopped_reason = "timeout".to_string();
+    push_acp_trace_error(
+        out,
+        "acp_turn_timeout",
+        format!(
+            "ACP prompt turn {} exceeded wall-clock timeout {}s",
+            out.turns_used,
+            turn_timeout.as_secs()
+        ),
+    );
+
+    match session
+        .connection()
+        .send_notification_to(Agent, CancelNotification::new(session_id.clone()))
+    {
+        Ok(()) => push_acp_trace_error(
+            out,
+            "acp_cancel",
+            format!("sent session/cancel for session `{session_id}` after ACP turn timeout"),
+        ),
+        Err(err) => push_acp_trace_error(
+            out,
+            "acp_cancel",
+            format!("failed to send session/cancel for session `{session_id}`: {err}"),
+        ),
+    }
+
+    let cleanup_timeout = acp_cleanup_timeout(idle_timeout);
+    let cancel_deadline = tokio::time::Instant::now() + cleanup_timeout;
+    while let Some(wait_timeout) = next_acp_update_timeout(cancel_deadline, cleanup_timeout) {
+        match tokio::time::timeout(wait_timeout, session.read_update()).await {
+            Ok(Ok(message)) => {
+                if apply_acp_session_message(message, client_bridge, out, progress)
+                    .await?
+                    .as_deref()
+                    == Some("cancelled")
+                {
+                    break;
+                }
+            }
+            Ok(Err(err)) => {
+                push_acp_trace_error(
+                    out,
+                    "acp_cancel",
+                    format!("error while waiting for cancellation confirmation: {err}"),
+                );
+                break;
+            }
+            Err(_) => break,
+        }
+    }
+
+    match close_acp_session(&session.connection(), session_id.clone(), cleanup_timeout).await {
+        Ok(()) => push_acp_trace_error(
+            out,
+            "acp_close",
+            format!("sent session/close for session `{session_id}` after ACP turn timeout"),
+        ),
+        Err(err) => push_acp_trace_error(
+            out,
+            "acp_close",
+            format!("failed to close session `{session_id}` after ACP turn timeout: {err}"),
+        ),
+    }
+    push_acp_trace_error(
+        out,
+        "acp_process_kill",
+        "ending ACP connection after timeout; managed ACP transport kills the child process tree on drop if it is still running",
+    );
+    flush_bridge_tool_calls(client_bridge, out);
+    Ok(())
+}
+
+async fn close_acp_session<Link>(
+    connection: &ConnectionTo<Link>,
+    session_id: agent_client_protocol::schema::SessionId,
+    timeout: Duration,
+) -> Result<(), String>
+where
+    Link: agent_client_protocol::role::HasPeer<Agent>,
+{
+    let close_request = connection
+        .send_request_to(Agent, CloseSessionRequest::new(session_id.clone()))
+        .block_task();
+    match tokio::time::timeout(timeout, close_request).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err(format!(
+            "session/close timed out after {}s",
+            timeout.as_secs()
+        )),
+    }
+}
+
+fn next_acp_update_timeout(
+    deadline: tokio::time::Instant,
+    idle_timeout: Duration,
+) -> Option<Duration> {
+    let now = tokio::time::Instant::now();
+    if now >= deadline {
+        return None;
+    }
+    Some((deadline - now).min(idle_timeout))
+}
+
+fn acp_cleanup_timeout(idle_timeout: Duration) -> Duration {
+    idle_timeout
+        .min(Duration::from_secs(5))
+        .max(Duration::from_millis(100))
+}
+
+fn push_acp_trace_error(out: &mut RuntimeRunResult, kind: &str, message: impl Into<String>) {
+    out.errors.push(TraceError {
+        kind: kind.to_string(),
+        message: message.into(),
+    });
 }
 
 fn acp_timeout_error(stage: &str, idle_timeout: Duration) -> agent_client_protocol::Error {
@@ -1197,20 +1628,22 @@ fn acp_tool_call_label(title: &str, kind: &str, raw_input: Option<&Value>) -> St
 fn build_acp_agent(
     agent: &ResolvedAcpAgent,
     scenario_env: &BTreeMap<String, String>,
-) -> anyhow::Result<AcpAgent> {
+) -> anyhow::Result<ManagedAcpAgent> {
     match &agent.launch {
         AcpAgentLaunch::Configured(config) => {
             let mut merged_env = scenario_env.clone();
             merged_env.extend(config.env.clone());
-            let mut args = merged_env
+            let env = merged_env
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
+                .map(|(key, value)| EnvVariable::new(key.clone(), value.clone()))
                 .collect::<Vec<_>>();
-            args.push(
-                resolve_command_path(&config.command).unwrap_or_else(|| config.command.clone()),
-            );
-            args.extend(config.args.clone());
-            AcpAgent::from_args(args).map_err(|err| anyhow::anyhow!("{err}"))
+            let command =
+                resolve_command_path(&config.command).unwrap_or_else(|| config.command.clone());
+            Ok(ManagedAcpAgent::new(McpServer::Stdio(
+                McpServerStdio::new(acp_stdio_name(&command), command)
+                    .args(config.args.clone())
+                    .env(env),
+            )))
         }
         AcpAgentLaunch::Builtin(profile) => build_builtin_acp_agent(*profile, scenario_env),
     }
@@ -1220,36 +1653,47 @@ fn build_acp_agent(
 fn build_builtin_acp_agent(
     profile: BuiltinAcpAgentProfile,
     scenario_env: &BTreeMap<String, String>,
-) -> anyhow::Result<AcpAgent> {
-    if !scenario_env.is_empty() {
-        return build_builtin_acp_agent_with_env(profile, scenario_env);
-    }
-    Ok(match profile {
-        BuiltinAcpAgentProfile::Gemini => AcpAgent::google_gemini(),
-        BuiltinAcpAgentProfile::ZedClaude => AcpAgent::zed_claude_code(),
-        BuiltinAcpAgentProfile::ZedCodex => AcpAgent::zed_codex(),
-    })
+) -> anyhow::Result<ManagedAcpAgent> {
+    build_builtin_acp_agent_with_env(profile, scenario_env)
 }
 
 #[cfg(windows)]
 fn build_builtin_acp_agent(
     profile: BuiltinAcpAgentProfile,
     scenario_env: &BTreeMap<String, String>,
-) -> anyhow::Result<AcpAgent> {
+) -> anyhow::Result<ManagedAcpAgent> {
     build_builtin_acp_agent_with_env(profile, scenario_env)
 }
 
 fn build_builtin_acp_agent_with_env(
     profile: BuiltinAcpAgentProfile,
     env: &BTreeMap<String, String>,
-) -> anyhow::Result<AcpAgent> {
-    let mut args = Vec::new();
-    args.extend(env.iter().map(|(key, value)| format!("{key}={value}")));
-    args.push(
-        resolve_command_path(profile.command()).unwrap_or_else(|| profile.command().to_string()),
-    );
-    args.extend(profile.args().iter().map(|arg| (*arg).to_string()));
-    AcpAgent::from_args(args).map_err(|err| anyhow::anyhow!("{err}"))
+) -> anyhow::Result<ManagedAcpAgent> {
+    let command =
+        resolve_command_path(profile.command()).unwrap_or_else(|| profile.command().to_string());
+    let env = env
+        .iter()
+        .map(|(key, value)| EnvVariable::new(key.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    Ok(ManagedAcpAgent::new(McpServer::Stdio(
+        McpServerStdio::new(acp_stdio_name(&command), command)
+            .args(
+                profile
+                    .args()
+                    .iter()
+                    .map(|arg| (*arg).to_string())
+                    .collect(),
+            )
+            .env(env),
+    )))
+}
+
+fn acp_stdio_name(command: &str) -> String {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent")
+        .to_string()
 }
 
 fn resolve_command_path(command: &str) -> Option<String> {

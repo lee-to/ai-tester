@@ -137,6 +137,7 @@ impl TraceRecord {
                 max_turns_user_set: false,
                 turns_used,
                 hit_max_turns: false,
+                stopped_reason: "end_turn".to_string(),
                 session_id: None,
                 sandbox_path: None,
             },
@@ -205,6 +206,8 @@ pub struct TraceRunner {
     pub max_turns_user_set: bool,
     pub turns_used: u32,
     pub hit_max_turns: bool,
+    #[serde(default)]
+    pub stopped_reason: String,
     pub session_id: Option<String>,
     pub sandbox_path: Option<String>,
 }

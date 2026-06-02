@@ -13,9 +13,11 @@ path = "src/main.rs"
 [dependencies]
 agent-client-protocol = "0.12.1"
 anyhow = "1.0"
+async-process = "2.5"
 camino = { version = "1.2", features = ["serde1"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.6", features = ["derive"] }
+futures = "0.3"
 owo-colors = "4.3"
 regex = "1.12"
 serde = { version = "1.0", features = ["derive"] }

@@ -62,6 +62,8 @@ enum Commands {
         idle_warn: u64,
         #[arg(long)]
         setup_timeout: Option<u64>,
+        #[arg(long)]
+        acp_turn_timeout: Option<u64>,
         /// Output format: live (default), json, or markdown
         #[arg(long, value_enum, default_value_t)]
         format: crate::commands::run::OutputFormat,
@@ -156,6 +158,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             quiet,
             idle_warn,
             setup_timeout,
+            acp_turn_timeout,
             format,
         } => run_command(RunOptions {
             skill,
@@ -175,6 +178,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             quiet,
             idle_warn_seconds: idle_warn,
             setup_timeout_seconds: setup_timeout,
+            acp_turn_timeout_seconds: acp_turn_timeout,
             format,
         })?,
         Commands::History {

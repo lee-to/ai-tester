@@ -96,6 +96,7 @@ defaults:
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
   setup_timeout_seconds: 60
+  acp_turn_timeout_seconds: 300
   # Optional for ACP:
   # runtime: acp
   # agent: gemini
@@ -156,6 +157,7 @@ ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --model gpt-5-codex --mode plan --reasoning high
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-log ./acp-logs
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-turn-timeout 120
 ai-tester run --file ./scenario.yaml --setup-timeout 10
 ai-tester run --dir ./prompts --runtime codex
 
@@ -602,6 +604,8 @@ Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent.
 Built-in auth requirements come from the underlying agent CLIs: Gemini supports Gemini CLI auth or `GEMINI_API_KEY` ([Gemini CLI auth docs](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html)); `zed-claude` uses Claude Code auth or Anthropic credentials such as `ANTHROPIC_API_KEY` ([Claude Code auth docs](https://code.claude.com/docs/en/authentication)); `zed-codex` uses Codex/OpenAI credentials ([Codex CLI sign-in docs](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)).
 
 ACP model/mode negotiation uses `runner.model`, `runner.mode`, and `runner.reasoning`, with CLI flags `--model`, `--mode`, and `--reasoning` taking precedence. `runner.mode` is an ACP session mode/config selector and is separate from `permission_mode`. Explicit values from CLI, scenario YAML, or project defaults fail fast when the agent does not expose a matching option or value; the built-in model default is not forced onto ACP agents that do not advertise model selection. Successful ACP traces include an `ACP effective config` diagnostic with the applied model/mode/reasoning.
+
+ACP prompt turns also have a wall-clock timeout separate from idle protocol progress. The default is 300 seconds; configure it with `defaults.acp_turn_timeout_seconds`, override it per scenario with `runner.acp_turn_timeout_seconds`, or override both with `ai-tester run --acp-turn-timeout <seconds>`. Precedence is CLI > scenario runner > project defaults > 300, and values must be positive. On timeout, `ai-tester` records `runner.stoppedReason` as `timeout` or `cancelled`, sends `session/cancel`, attempts `session/close`, and tears down the managed ACP process tree.
 
 Supported MCP transports are stdio (default when `type` is omitted), `http`, and `sse`. Stdio servers use `command`, optional `args`, and optional `env`; HTTP/SSE servers use `url` and optional `headers`. Env and header values are redacted in ai-tester trace diagnostics.
 

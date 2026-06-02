@@ -181,6 +181,32 @@ fn cli_run_rejects_zero_setup_timeout() {
 }
 
 #[test]
+fn cli_run_rejects_zero_acp_turn_timeout() {
+    let tmp = TempDir::new().expect("temp dir");
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: zero-acp-turn-timeout\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--acp-turn-timeout",
+            "0",
+            "--quiet",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("ACP turn timeout"))
+        .stderr(predicate::str::contains("positive"));
+}
+
+#[test]
 fn cli_run_setup_timeout_cli_overrides_scenario_timeout() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -1409,6 +1435,119 @@ fn cli_run_with_fake_acp_invalid_stdout_reports_transcript_path() {
     assert!(transcript.contains("<redacted>"));
     assert!(!transcript.contains("invalid-secret"));
     assert!(!transcript.contains("bad-secret"));
+}
+
+#[test]
+fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    let log_dir = tmp.path().join("acp-logs");
+    let pid_file = tmp.path().join("fake-acp-timeout.pid");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_turn_timeout(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        format!(
+            "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-timeout\n    args: []\n    env:\n      AI_TESTER_ACP_PID_FILE: {}\n",
+            yaml_path(&pid_file)
+        ),
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-acp-turn-timeout\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions: []\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let started = Instant::now();
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    let assert = cmd
+        .current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--acp-log",
+            log_dir.to_str().unwrap(),
+            "--acp-turn-timeout",
+            "1",
+            "--idle-warn",
+            "2",
+            "--quiet",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("FAIL"));
+    let output = assert.get_output().clone();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "ACP timeout run took too long: {:?}",
+        started.elapsed()
+    );
+
+    let trace_dir = tmp.path().join("runs/inline_fake-acp-turn-timeout");
+    let traces = fs::read_dir(&trace_dir)
+        .unwrap_or_else(|err| {
+            panic!(
+                "trace dir {}: {err}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+                trace_dir.display()
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    let stopped = trace["runner"]["stoppedReason"]
+        .as_str()
+        .expect("stopped reason recorded");
+    assert!(
+        stopped == "timeout" || stopped == "cancelled",
+        "unexpected stopped reason: {stopped}"
+    );
+    let error_kinds = trace["errors"]
+        .as_array()
+        .expect("errors array")
+        .iter()
+        .filter_map(|error| error["kind"].as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "acp_turn_timeout",
+        "acp_cancel",
+        "acp_close",
+        "acp_process_kill",
+    ] {
+        assert!(
+            error_kinds.contains(&expected),
+            "expected error kind {expected}, got {error_kinds:?}"
+        );
+    }
+
+    let transcript_files = fs::read_dir(&log_dir)
+        .expect("log dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("log entries");
+    assert_eq!(transcript_files.len(), 1);
+    let transcript = fs::read_to_string(transcript_files[0].path()).expect("transcript readable");
+    assert!(transcript.contains("session/cancel"), "{transcript}");
+
+    let pid_text = fs::read_to_string(&pid_file).expect("pid file readable");
+    let pid = pid_text.trim().parse::<u32>().expect("pid parses");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_is_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        !process_is_alive(pid),
+        "fake ACP process {pid} should be cleaned up"
+    );
 }
 
 #[test]
@@ -3147,6 +3286,114 @@ done
     }
 }
 
+fn write_fake_acp_turn_timeout(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-timeout.cmd");
+        let ps1_path = bin_dir.join("fake-acp-timeout.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-timeout.ps1\"\r\n",
+        )
+        .expect("fake acp timeout wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+if ($env:AI_TESTER_ACP_PID_FILE) {
+    Set-Content -LiteralPath $env:AI_TESTER_ACP_PID_FILE -Value $PID
+}
+
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-timeout"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ sessionId = "s1"; configOptions = @() }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        while ($true) {
+            Write-Json @{
+                jsonrpc = "2.0"
+                method = "session/update"
+                params = @{
+                    sessionId = "s1"
+                    update = @{
+                        sessionUpdate = "agent_message_chunk"
+                        content = @{ type = "text"; text = "tick" }
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 100
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp timeout script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-timeout");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ -n "$AI_TESTER_ACP_PID_FILE" ]; then
+  printf '%s\n' "$$" > "$AI_TESTER_ACP_PID_FILE"
+fi
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-timeout\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      while true; do
+        echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"tick"}}}}'
+        sleep 0.1
+      done
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp timeout written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
 fn write_fake_acp_invalid_stdout(bin_dir: &Path) {
     #[cfg(windows)]
     {
@@ -3193,6 +3440,30 @@ fn join_path_prefix(bin_dir: &Path, old_path: &std::ffi::OsStr) -> std::ffi::OsS
     out.push(sep);
     out.push(old_path);
     out
+}
+
+fn yaml_path(path: &Path) -> String {
+    format!("\"{}\"", path.to_string_lossy().replace('\\', "/"))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output();
+        output.is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
 }
 
 fn ai_tester_temp_dirs(scenario_name: &str) -> Vec<std::path::PathBuf> {
