@@ -72,7 +72,8 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             tool_pattern,
             args_match,
             call_index,
-            ..
+            capture,
+            capture_max_chars,
         } => evaluate_tool_called(
             id,
             *weight,
@@ -80,17 +81,20 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             tool_pattern.as_deref(),
             args_match.as_ref(),
             *call_index,
+            capture.as_deref(),
+            *capture_max_chars,
             trace,
         ),
         AssertionSpec::ToolCallSequence {
             id,
             weight,
             sequence,
-            ..
+            capture_max_chars,
         } => {
             let mut next_index = 0usize;
+            let mut captures = Vec::new();
             let calls = all_tool_calls(trace);
-            for step in sequence {
+            for (step_index, step) in sequence.iter().enumerate() {
                 let args_matcher = match ArgsMatcher::new(step.args_match.as_ref()) {
                     Ok(matcher) => matcher,
                     Err(err) => {
@@ -115,14 +119,24 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
                         format!("missing sequence step for tool `{}`", step.tool),
                     );
                 };
+                let matched_call = calls[next_index + offset];
+                captures.extend(capture_fields(
+                    &matched_call.input,
+                    step.capture.as_deref(),
+                    *capture_max_chars,
+                    Some(step_index + 1),
+                ));
                 next_index += offset + 1;
             }
-            base_result(
-                id,
-                "tool_call_sequence",
-                true,
-                *weight,
-                "sequence matched".to_string(),
+            with_captures(
+                base_result(
+                    id,
+                    "tool_call_sequence",
+                    true,
+                    *weight,
+                    "sequence matched".to_string(),
+                ),
+                captures,
             )
         }
         AssertionSpec::NoToolCalled {
@@ -414,6 +428,8 @@ fn evaluate_tool_called(
     tool_pattern: Option<&str>,
     expected_args: Option<&BTreeMap<String, String>>,
     call_index: Option<usize>,
+    capture: Option<&[String]>,
+    capture_max_chars: Option<usize>,
     trace: &TraceRecord,
 ) -> AssertionResult {
     let pattern = match tool_pattern {
@@ -454,17 +470,62 @@ fn evaluate_tool_called(
     let pass = call_index
         .map(|idx| matches.get(idx).is_some())
         .unwrap_or(!matches.is_empty());
-    base_result(
-        id,
-        "tool_called",
-        pass,
-        weight,
-        if pass {
-            format!("found `{}` call", tool.unwrap_or("<matching pattern>"))
-        } else {
-            format!("no `{}` call matched", tool.unwrap_or("<matching pattern>"))
-        },
+    let captures = call_index
+        .and_then(|idx| matches.get(idx).copied())
+        .or_else(|| matches.first().copied())
+        .filter(|_| pass)
+        .map(|call| capture_fields(&call.input, capture, capture_max_chars, None))
+        .unwrap_or_default();
+    with_captures(
+        base_result(
+            id,
+            "tool_called",
+            pass,
+            weight,
+            if pass {
+                format!("found `{}` call", tool.unwrap_or("<matching pattern>"))
+            } else {
+                format!("no `{}` call matched", tool.unwrap_or("<matching pattern>"))
+            },
+        ),
+        captures,
     )
+}
+
+fn capture_fields(
+    input: &Value,
+    fields: Option<&[String]>,
+    max_chars: Option<usize>,
+    step: Option<usize>,
+) -> Vec<CaptureRecord> {
+    let Some(fields) = fields else {
+        return Vec::new();
+    };
+    fields
+        .iter()
+        .map(|field| {
+            let raw = input.get(field).map(value_to_string).unwrap_or_default();
+            let original_length = raw.chars().count();
+            let (value, truncated) = match max_chars {
+                Some(max) if original_length > max => {
+                    (raw.chars().take(max).collect::<String>(), true)
+                }
+                _ => (raw, false),
+            };
+            CaptureRecord {
+                field: field.clone(),
+                value,
+                truncated,
+                original_length,
+                step,
+            }
+        })
+        .collect()
+}
+
+fn with_captures(mut result: AssertionResult, captures: Vec<CaptureRecord>) -> AssertionResult {
+    result.captures = captures;
+    result
 }
 
 fn evaluate_no_unanswered_questions(trace: &TraceRecord) -> AssertionResult {

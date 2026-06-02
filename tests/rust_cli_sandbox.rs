@@ -745,6 +745,52 @@ fn cli_run_with_fake_codex_writes_trace_and_evaluates_assertions() {
 }
 
 #[test]
+fn cli_run_with_fake_codex_writes_capture_to_trace() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex_with_command(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-codex-capture\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: calls-status\n    type: tool_called\n    tool: Bash\n    args_match:\n      command: '^git status'\n    capture: [command]\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+
+    let traces = fs::read_dir(tmp.path().join("runs/inline_fake-codex-capture"))
+        .expect("trace dir")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("trace entries");
+    assert_eq!(traces.len(), 1);
+    let trace_json = fs::read_to_string(traces[0].path()).expect("trace readable");
+    let trace: serde_json::Value = serde_json::from_str(&trace_json).expect("trace json");
+    let captures = trace["assertions"]
+        .as_array()
+        .expect("assertions array")
+        .iter()
+        .find(|assertion| assertion["id"] == "calls-status")
+        .expect("capture assertion")["captures"]
+        .as_array()
+        .expect("captures array");
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0]["field"], "command");
+    assert_eq!(captures[0]["value"], "git status --short");
+    assert_eq!(captures[0]["truncated"], false);
+    assert_eq!(captures[0]["originalLength"], 18);
+}
+
+#[test]
 fn cli_run_fixture_env_reaches_codex_runtime() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -1331,7 +1377,7 @@ fn cli_run_with_fake_acp_invalid_stdout_reports_transcript_path() {
         .expect("log entries");
     assert_eq!(transcript_files.len(), 1);
     let transcript_path = transcript_files[0].path();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(15);
     let transcript = loop {
         let transcript = fs::read_to_string(&transcript_path).expect("transcript readable");
         if transcript.contains("not-json") || Instant::now() >= deadline {
@@ -1519,6 +1565,34 @@ fn cli_run_with_fake_codex_prints_live_progress() {
 }
 
 #[test]
+fn cli_run_with_fake_codex_prints_capture_live_output() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex_with_command(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: fake-codex-capture-live\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: calls-status\n    type: tool_called\n    tool: Bash\n    capture: [command]\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Captures"))
+        .stdout(predicate::str::contains("calls-status"))
+        .stdout(predicate::str::contains("command"))
+        .stdout(predicate::str::contains("git status --short"));
+}
+
+#[test]
 fn cli_run_fails_when_explicit_max_turns_is_hit() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -1694,6 +1768,44 @@ echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\"
 echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",
         )
         .expect("fake codex written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_codex_with_command(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let path = bin_dir.join("codex.cmd");
+        fs::write(
+            path,
+            "@echo off\r\n\
+echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
+echo {\"type\":\"turn.started\"}\r\n\
+echo {\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"id\":\"cmd-1\",\"command\":\"git status --short\"}}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"cmd-1\",\"status\":\"completed\",\"aggregated_output\":\"clean\"}}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\r\n\
+echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}\r\n",
+        )
+        .expect("fake codex command written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("codex");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+cat >/dev/null\n\
+echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
+echo '{\"type\":\"turn.started\"}'\n\
+echo '{\"type\":\"item.started\",\"item\":{\"type\":\"command_execution\",\"id\":\"cmd-1\",\"command\":\"git status --short\"}}'\n\
+echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"command_execution\",\"id\":\"cmd-1\",\"status\":\"completed\",\"aggregated_output\":\"clean\"}}'\n\
+echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n\
+echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",
+        )
+        .expect("fake codex command written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");

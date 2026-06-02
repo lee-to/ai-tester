@@ -720,6 +720,107 @@ fn tool_called_accepts_tool_pattern() {
 }
 
 #[test]
+fn tool_called_capture_records_matched_field() {
+    let yaml = "scenario: capture-command\nsystem_prompt: Body\nassertions:\n  - id: calls-status\n    type: tool_called\n    tool: Bash\n    args_match:\n      command: '^git status'\n    capture: [command]\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "1",
+            "Bash",
+            serde_json::json!({"command": "git status --short"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "calls-status")
+        .expect("assertion result");
+    assert!(result.pass, "{results:#?}");
+    assert_eq!(result.captures.len(), 1);
+    assert_eq!(result.captures[0].field, "command");
+    assert_eq!(result.captures[0].value, "git status --short");
+    assert!(!result.captures[0].truncated);
+    assert_eq!(result.captures[0].original_length, 18);
+    assert_eq!(result.captures[0].step, None);
+}
+
+#[test]
+fn tool_called_capture_truncates_and_uses_selected_call_index() {
+    let yaml = "scenario: capture-index\nsystem_prompt: Body\nassertions:\n  - id: second-bash\n    type: tool_called\n    tool: Bash\n    call_index: 1\n    capture: [command]\n    capture_max_chars: 8\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool("1", "Bash", serde_json::json!({"command": "git status"})),
+            Turn::assistant_with_tool(
+                "2",
+                "Bash",
+                serde_json::json!({"command": "echo привет мир"}),
+            ),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "second-bash")
+        .expect("assertion result");
+    assert!(result.pass, "{results:#?}");
+    assert_eq!(result.captures.len(), 1);
+    assert_eq!(result.captures[0].value, "echo при");
+    assert!(result.captures[0].truncated);
+    assert_eq!(result.captures[0].original_length, 15);
+}
+
+#[test]
+fn tool_call_sequence_capture_records_step_fields_and_missing_values() {
+    let yaml = "scenario: sequence-capture\nsystem_prompt: Body\nassertions:\n  - id: status-before-commit\n    type: tool_call_sequence\n    capture_max_chars: 0\n    sequence:\n      - tool: Bash\n        args_match:\n          command: '^git status'\n        capture: [command, missing]\n      - tool: Bash\n        args_match:\n          command: '^git commit'\n        capture: [command]\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "Bash",
+                serde_json::json!({"command": "git status --short"}),
+            ),
+            Turn::assistant_with_tool(
+                "2",
+                "Bash",
+                serde_json::json!({"command": "git commit -m feat"}),
+            ),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "status-before-commit")
+        .expect("assertion result");
+    assert!(result.pass, "{results:#?}");
+    assert_eq!(result.captures.len(), 3);
+    assert_eq!(result.captures[0].field, "command");
+    assert_eq!(result.captures[0].value, "");
+    assert!(result.captures[0].truncated);
+    assert_eq!(result.captures[0].original_length, 18);
+    assert_eq!(result.captures[0].step, Some(1));
+    assert_eq!(result.captures[1].field, "missing");
+    assert_eq!(result.captures[1].value, "");
+    assert!(!result.captures[1].truncated);
+    assert_eq!(result.captures[1].original_length, 0);
+    assert_eq!(result.captures[1].step, Some(1));
+    assert_eq!(result.captures[2].step, Some(2));
+}
+
+#[test]
 fn invalid_regex_no_tool_called_tool_pattern_fails_assertion() {
     let yaml = "scenario: invalid-pattern\nsystem_prompt: Body\nassertions:\n  - id: no-invalid-pattern\n    type: no_tool_called\n    tool_pattern: '['\n";
     let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");

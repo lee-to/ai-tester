@@ -407,6 +407,8 @@ subprocesses for Claude, Codex, and ACP. Precedence is predictable:
   tool: Bash
   args_match:
     command: "^git status"
+  capture: [command]
+  capture_max_chars: 200
 
 - id: calls-codegraph
   type: tool_called
@@ -422,10 +424,17 @@ subprocesses for Claude, Codex, and ACP. Precedence is predictable:
     - tool: Bash
       args_match:
         command: "^git status"
+      capture: [command]
     - tool: Bash
       args_match:
         command: "^git commit"
+      capture: [command]
+  capture_max_chars: 200
 ```
+
+`capture` stores top-level tool input fields from the matched tool call in the
+assertion result. Captures are included in JSON traces and shown in live and
+Markdown output. `capture_max_chars` truncates long captured values.
 
 ### `no_tool_called`
 

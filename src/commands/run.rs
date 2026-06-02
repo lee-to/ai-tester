@@ -4,7 +4,9 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use chrono::Utc;
 
-use crate::assertions::{compute_weighted_score, evaluate_assertions, AssertionResult};
+use crate::assertions::{
+    compute_weighted_score, evaluate_assertions, AssertionResult, CaptureRecord,
+};
 use crate::config::load_project_config;
 use crate::sandbox::{create_sandbox, SandboxOptions, SkillInstall};
 use crate::scenario::{load_scenario_file, LoadedScenario, Scenario};
@@ -465,7 +467,8 @@ fn render_markdown(records: &[TraceRecord]) -> String {
 
     for record in records {
         let has_failed = record.assertions.iter().any(|a| !a.pass);
-        if !has_failed && record.errors.is_empty() {
+        let has_captures = record.assertions.iter().any(|a| !a.captures.is_empty());
+        if !has_failed && record.errors.is_empty() && !has_captures {
             continue;
         }
         out.push_str(&format!("## {}\n\n", record.scenario.name));
@@ -474,6 +477,20 @@ fn render_markdown(records: &[TraceRecord]) -> String {
                 "- ❌ **{}**: {}\n",
                 assertion.id, assertion.detail
             ));
+        }
+        for assertion in record
+            .assertions
+            .iter()
+            .filter(|assertion| !assertion.captures.is_empty())
+        {
+            for capture in &assertion.captures {
+                out.push_str(&format!(
+                    "- 📎 **{}** {}: {}\n",
+                    assertion.id,
+                    format_capture_field(capture),
+                    format_capture_value(capture),
+                ));
+            }
         }
         for error in &record.errors {
             out.push_str(&format!("- ⚠️ **{}**: {}\n", error.kind, error.message));
@@ -1221,6 +1238,7 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
                 ui::paint(&assertion.id, Tone::Strong),
                 ui::paint(&assertion.detail, Tone::Muted)
             );
+            print_assertion_captures(assertion, "      ", true);
         }
     } else if !record.assertions.is_empty() {
         let passed = record
@@ -1252,6 +1270,7 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
                 );
             }
         }
+        print_record_captures(record);
     }
 
     for error in &record.errors {
@@ -1261,6 +1280,60 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
             ui::paint(&error.kind, Tone::Error),
             error.message
         );
+    }
+}
+
+fn print_record_captures(record: &TraceRecord) {
+    let captured = record
+        .assertions
+        .iter()
+        .filter(|assertion| !assertion.captures.is_empty())
+        .collect::<Vec<_>>();
+    if captured.is_empty() {
+        return;
+    }
+    println!("  {}", ui::section("Captures"));
+    for assertion in captured {
+        print_assertion_captures(assertion, "    ", false);
+    }
+}
+
+fn print_assertion_captures(assertion: &AssertionResult, indent: &str, include_heading: bool) {
+    if assertion.captures.is_empty() {
+        return;
+    }
+    if include_heading {
+        println!("{indent}{}", ui::section("Captures"));
+    }
+    for capture in &assertion.captures {
+        println!(
+            "{indent}  {} {} {}",
+            ui::paint("●", Tone::Info),
+            ui::paint(&assertion.id, Tone::Strong),
+            ui::paint(
+                &format!(
+                    "{}: {}",
+                    format_capture_field(capture),
+                    format_capture_value(capture)
+                ),
+                Tone::Muted,
+            )
+        );
+    }
+}
+
+fn format_capture_field(capture: &CaptureRecord) -> String {
+    match capture.step {
+        Some(step) => format!("{}[step {step}]", capture.field),
+        None => capture.field.clone(),
+    }
+}
+
+fn format_capture_value(capture: &CaptureRecord) -> String {
+    if capture.truncated {
+        format!("{} <truncated>", capture.value)
+    } else {
+        capture.value.clone()
     }
 }
 
@@ -1300,6 +1373,7 @@ fn format_score(score: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assertions::CaptureRecord;
     use crate::trace::{TraceError, TraceRecord};
 
     fn passing_record(name: &str) -> TraceRecord {
@@ -1322,6 +1396,28 @@ mod tests {
             min_score: None,
             rationale: None,
             captures: Vec::new(),
+        });
+        record
+    }
+
+    fn captured_record(name: &str) -> TraceRecord {
+        let mut record = passing_record(name);
+        record.assertions.push(AssertionResult {
+            id: "calls-status".to_string(),
+            kind: "tool_called".to_string(),
+            pass: true,
+            detail: "found `Bash` call".to_string(),
+            weight: 1.0,
+            score: None,
+            min_score: None,
+            rationale: None,
+            captures: vec![CaptureRecord {
+                field: "command".to_string(),
+                value: "git status --short".to_string(),
+                truncated: false,
+                original_length: 18,
+                step: None,
+            }],
         });
         record
     }
@@ -1382,6 +1478,18 @@ mod tests {
         assert!(md.contains("## beta"));
         assert!(!md.contains("## alpha"));
         assert!(md.contains("missing expected text"));
+    }
+
+    #[test]
+    fn markdown_reports_capture_detail_for_passing_scenario() {
+        let records = vec![captured_record("alpha")];
+        let md = render_markdown(&records);
+
+        assert!(md.contains("**PASS**"));
+        assert!(md.contains("## alpha"));
+        assert!(md.contains("calls-status"));
+        assert!(md.contains("command"));
+        assert!(md.contains("git status --short"));
     }
 
     #[test]
