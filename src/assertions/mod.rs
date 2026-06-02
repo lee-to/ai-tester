@@ -331,7 +331,42 @@ fn file_read_call_matches(call: &ToolCallRecord, path_re: &regex::Regex) -> bool
             .get("path")
             .map(value_to_string)
             .is_some_and(|path| path_re.is_match(&path)),
+        "read" => acp_path_candidates(&call.input)
+            .iter()
+            .any(|path| path_re.is_match(path)),
+        "execute" => acp_command(&call.input)
+            .as_deref()
+            .is_some_and(|command| bash_command_reads_path(command, path_re)),
         _ => false,
+    }
+}
+
+fn acp_command(input: &Value) -> Option<String> {
+    value_at_path(input, "command")
+        .or_else(|| value_at_path(input, "rawInput.command"))
+        .map(value_to_string)
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn acp_path_candidates(input: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for field in ["path", "file_path", "rawInput.path", "rawInput.file_path"] {
+        push_string_value(&mut paths, value_at_path(input, field));
+    }
+    if let Some(Value::Array(locations)) = value_at_path(input, "_acpLocations") {
+        for location in locations {
+            push_string_value(&mut paths, value_at_path(location, "path"));
+            push_string_value(&mut paths, value_at_path(location, "uri"));
+        }
+    }
+    paths
+}
+
+fn push_string_value(out: &mut Vec<String>, value: Option<&Value>) {
+    if let Some(value) = value.and_then(Value::as_str) {
+        if !value.trim().is_empty() {
+            out.push(value.to_string());
+        }
     }
 }
 

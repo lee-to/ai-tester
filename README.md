@@ -497,7 +497,11 @@ an empty string, so `^$` matches an absent field and non-empty regexes do not.
 
 ### `file_read`
 
-Runtime-neutral check that a file was actually inspected. It matches Claude `Read(file_path)` and Codex `Bash(command)` reader commands such as `sed`, `cat`, `nl`, `rg`, `grep`, `head`, and `tail`.
+Runtime-neutral check that a file was actually inspected. It matches Claude
+`Read(file_path)`, Codex `Bash(command)` reader commands such as `sed`, `cat`,
+`nl`, `rg`, `grep`, `head`, and `tail`, and ACP `read` calls with `path`,
+`file_path`, `rawInput.path`, `rawInput.file_path`, or `_acpLocations` path/URI
+metadata. ACP `execute` calls use the same reader-command detection as Bash.
 
 ```yaml
 - id: reads-runtime

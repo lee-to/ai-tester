@@ -1206,6 +1206,136 @@ fn file_read_matches_claude_read_and_codex_bash_readers() {
 }
 
 #[test]
+fn file_read_matches_acp_normalized_read_path_sources() {
+    let assertions = vec![AssertionSpec::file_read(
+        "reads-runtime",
+        "src/runtime/mod\\.rs",
+    )];
+
+    let cases = [
+        (
+            "direct path",
+            Turn::assistant_with_tool(
+                "acp-read-direct",
+                "read",
+                serde_json::json!({"path": "src/runtime/mod.rs"}),
+            ),
+        ),
+        (
+            "direct file_path",
+            Turn::assistant_with_tool(
+                "acp-read-file-path",
+                "read",
+                serde_json::json!({"file_path": "src/runtime/mod.rs"}),
+            ),
+        ),
+        (
+            "rawInput path",
+            Turn::assistant_with_tool(
+                "acp-read-raw-path",
+                "read",
+                serde_json::json!({"rawInput": {"path": "src/runtime/mod.rs"}}),
+            ),
+        ),
+        (
+            "rawInput file_path",
+            Turn::assistant_with_tool(
+                "acp-read-raw-file-path",
+                "read",
+                serde_json::json!({"rawInput": {"file_path": "src/runtime/mod.rs"}}),
+            ),
+        ),
+        (
+            "_acpLocations path",
+            Turn::assistant_with_tool(
+                "acp-read-location-path",
+                "read",
+                serde_json::json!({"_acpLocations": [{"path": "src/runtime/mod.rs"}]}),
+            ),
+        ),
+        (
+            "_acpLocations uri",
+            Turn::assistant_with_tool(
+                "acp-read-location-uri",
+                "read",
+                serde_json::json!({"_acpLocations": [{"uri": "file:///repo/src/runtime/mod.rs"}]}),
+            ),
+        ),
+    ];
+
+    for (label, turn) in cases {
+        let trace = TraceRecord::synthetic(vec![turn], "done".to_string(), 1, None);
+        let results = evaluate_assertions(&assertions, &trace);
+        assert!(
+            results
+                .iter()
+                .any(|result| result.id == "reads-runtime" && result.pass),
+            "{label}: {results:#?}"
+        );
+    }
+}
+
+#[test]
+fn file_read_matches_acp_execute_reader_commands_only() {
+    let assertions = vec![AssertionSpec::file_read(
+        "reads-runtime",
+        "src/runtime/mod\\.rs",
+    )];
+
+    let reader_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "acp-exec-reader",
+            "execute",
+            serde_json::json!({"rawInput": {"command": "sed -n '1,80p' src/runtime/mod.rs"}}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let reader_results = evaluate_assertions(&assertions, &reader_trace);
+    assert!(
+        reader_results
+            .iter()
+            .any(|result| result.id == "reads-runtime" && result.pass),
+        "{reader_results:#?}"
+    );
+
+    let non_reader_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "acp-exec-non-reader",
+            "execute",
+            serde_json::json!({"rawInput": {"command": "cargo test src/runtime/mod.rs"}}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let non_reader_results = evaluate_assertions(&assertions, &non_reader_trace);
+    let non_reader = non_reader_results
+        .iter()
+        .find(|result| result.id == "reads-runtime")
+        .expect("file_read result");
+    assert!(!non_reader.pass, "{non_reader_results:#?}");
+
+    let edit_trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "acp-edit",
+            "edit",
+            serde_json::json!({"path": "src/runtime/mod.rs"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let edit_results = evaluate_assertions(&assertions, &edit_trace);
+    let edit = edit_results
+        .iter()
+        .find(|result| result.id == "reads-runtime")
+        .expect("file_read result");
+    assert!(!edit.pass, "{edit_results:#?}");
+}
+
+#[test]
 fn file_read_does_not_match_non_reader_bash_mentions() {
     let trace = TraceRecord::synthetic(
         vec![Turn::assistant_with_tool(
