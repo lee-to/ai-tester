@@ -1,6 +1,7 @@
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const INTERNAL_MAX_TURNS: u32 = 40;
 pub const DEFAULT_PASS_THRESHOLD: f64 = 0.85;
+pub const DEFAULT_SETUP_TIMEOUT_SECONDS: u64 = 60;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -29,6 +30,7 @@ pub struct ProjectDefaults {
     pub mode: Option<String>,
     pub reasoning: Option<String>,
     pub permission_mode: Option<String>,
+    pub setup_timeout_seconds: Option<u64>,
     pub agent: Option<String>,
     pub mcp_profile: Option<String>,
 }
@@ -209,6 +211,7 @@ struct RawProjectDefaults {
     mode: Option<String>,
     reasoning: Option<String>,
     permission_mode: Option<String>,
+    setup_timeout_seconds: Option<u64>,
     agent: Option<String>,
     mcp_profile: Option<String>,
 }
@@ -236,6 +239,14 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
     if let Some(config_path) = found {
         let root_dir = config_path.parent().unwrap_or(&start).to_path_buf();
         let raw: RawProjectConfig = yaml_serde::from_str(&fs::read_to_string(&config_path)?)?;
+        if raw
+            .defaults
+            .as_ref()
+            .and_then(|defaults| defaults.setup_timeout_seconds)
+            == Some(0)
+        {
+            bail!("defaults.setup_timeout_seconds must be positive");
+        }
         let skills_dir = raw
             .skills_dir
             .as_deref()
@@ -260,6 +271,7 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
                     .defaults
                     .as_ref()
                     .and_then(|d| d.permission_mode.clone()),
+                setup_timeout_seconds: raw.defaults.as_ref().and_then(|d| d.setup_timeout_seconds),
                 agent: raw.defaults.as_ref().and_then(|d| d.agent.clone()),
                 mcp_profile: raw.defaults.and_then(|d| d.mcp_profile),
             },

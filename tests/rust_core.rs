@@ -20,6 +20,7 @@ use ai_tester::util::regex::compile_pattern;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
@@ -107,6 +108,102 @@ fn fixtures_env_overrides_host_env_for_setup_commands() {
     }
 }
 
+#[test]
+fn fixtures_setup_timeout_rejects_zero() {
+    let err = Scenario::from_yaml_str(
+        "scenario: timeout-zero\nsystem_prompt: Body\nfixtures:\n  setup_timeout_seconds: 0\n",
+    )
+    .expect_err("zero timeout rejected");
+    assert!(err.to_string().contains("setup_timeout_seconds"));
+    assert!(err.to_string().contains("positive"));
+}
+
+#[test]
+fn fixtures_setup_command_timeout_reports_output_and_cleans_up() {
+    for path in temp_ai_tester_dirs("setup-timeout") {
+        let _ = fs::remove_dir_all(path);
+    }
+    let command = if cfg!(windows) {
+        "echo setup-out && echo setup-err 1>&2 && ping -n 6 127.0.0.1 > nul"
+    } else {
+        "echo setup-out; echo setup-err >&2; sleep 5"
+    };
+    let fixtures = Fixtures {
+        setup_commands: vec![command.to_string()],
+        ..Default::default()
+    };
+
+    let started = Instant::now();
+    let err = create_sandbox(
+        "setup-timeout",
+        &fixtures,
+        SandboxOptions {
+            setup_timeout: Duration::from_secs(1),
+            ..Default::default()
+        },
+    )
+    .expect_err("setup command times out");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "timeout took too long: {:?}",
+        started.elapsed()
+    );
+    let message = err.to_string();
+    assert!(message.contains("setup command timed out"));
+    assert!(message.contains("timeout 1s"));
+    assert!(message.contains(command));
+    assert!(message.contains("setup-out"));
+    assert!(message.contains("setup-err"));
+    assert!(
+        !temp_ai_tester_dirs("setup-timeout")
+            .into_iter()
+            .any(|path| path.exists()),
+        "timed out sandbox should be cleaned up"
+    );
+}
+
+#[test]
+fn fixtures_setup_timeout_kills_process_tree() {
+    let marker = TempDir::new().expect("marker temp dir");
+    let marker_file = marker.path().join("late-marker.txt");
+    let marker_text = marker_file.to_string_lossy().replace('\\', "/");
+    let command = if cfg!(windows) {
+        format!(
+            "start /B powershell -NoProfile -Command \"Start-Sleep -Seconds 3; Set-Content -LiteralPath '{marker_text}' -Value late\" & ping -n 6 127.0.0.1 > nul"
+        )
+    } else {
+        format!("(sleep 3; echo late > '{marker_text}') & sleep 5")
+    };
+    let fixtures = Fixtures {
+        setup_commands: vec![command],
+        ..Default::default()
+    };
+
+    let _ = create_sandbox(
+        "setup-tree-timeout",
+        &fixtures,
+        SandboxOptions {
+            setup_timeout: Duration::from_secs(1),
+            ..Default::default()
+        },
+    )
+    .expect_err("setup command times out");
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !marker_file.exists(),
+        "process tree child should not create marker after timeout"
+    );
+}
+
+#[test]
+fn fixtures_setup_timeout_seconds_parses() {
+    let scenario = Scenario::from_yaml_str(
+        "scenario: setup-timeout\nsystem_prompt: Body\nfixtures:\n  setup_timeout_seconds: 7\n",
+    )
+    .expect("scenario parses");
+    assert_eq!(scenario.fixtures.setup_timeout_seconds, Some(7));
+}
+
 #[cfg(windows)]
 #[test]
 fn path_helper_strips_windows_verbatim_prefix() {
@@ -128,6 +225,20 @@ fn path_helper_rejects_write_through_symlink_outside_sandbox() {
     let err = resolve_write_target_inside(sandbox.path(), Path::new("linked/escape.txt"))
         .expect_err("symlink escape rejected");
     assert!(err.to_string().contains("escapes sandbox"));
+}
+
+fn temp_ai_tester_dirs(scenario_name: &str) -> Vec<std::path::PathBuf> {
+    let prefix = format!("ai-tester-{scenario_name}-");
+    std::fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect()
 }
 
 #[test]
@@ -222,7 +333,7 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     std::fs::create_dir_all(&nested).expect("nested created");
     std::fs::write(
         tmp.path().join(".ai-tester.yaml"),
-        "skills_dir: ./custom-skills\ndefaults:\n  model: custom\n  permission_mode: plan\n  mode: review\n  reasoning: high\n",
+        "skills_dir: ./custom-skills\ndefaults:\n  model: custom\n  permission_mode: plan\n  mode: review\n  reasoning: high\n  setup_timeout_seconds: 12\n",
     )
     .expect("config written");
 
@@ -233,6 +344,22 @@ fn project_config_walks_up_and_resolves_skills_dir() {
     assert_eq!(config.defaults.permission_mode.as_deref(), Some("plan"));
     assert_eq!(config.defaults.mode.as_deref(), Some("review"));
     assert_eq!(config.defaults.reasoning.as_deref(), Some("high"));
+    assert_eq!(config.defaults.setup_timeout_seconds, Some(12));
+}
+
+#[test]
+fn project_config_rejects_zero_setup_timeout() {
+    let tmp = TempDir::new().expect("temp dir");
+    std::fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "defaults:\n  setup_timeout_seconds: 0\n",
+    )
+    .expect("config written");
+
+    let err = load_project_config(tmp.path()).expect_err("zero setup timeout rejected");
+    let message = err.to_string();
+    assert!(message.contains("defaults.setup_timeout_seconds"));
+    assert!(message.contains("positive"));
 }
 
 #[test]

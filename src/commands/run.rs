@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::Utc;
@@ -44,10 +44,14 @@ pub struct RunOptions {
     pub keep_sandbox: bool,
     pub quiet: bool,
     pub idle_warn_seconds: u64,
+    pub setup_timeout_seconds: Option<u64>,
     pub format: OutputFormat,
 }
 
 pub fn run_command(opts: RunOptions) -> anyhow::Result<i32> {
+    if opts.setup_timeout_seconds == Some(0) {
+        anyhow::bail!("setup timeout must be positive");
+    }
     if opts.dry_run {
         return run_dry_run(opts);
     }
@@ -147,6 +151,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
         let config = load_project_config(std::env::current_dir()?)?;
+        let setup_timeout = effective_setup_timeout(&opts, &config, &scenario);
         let runtime_status = crate::runtime::runtime_status_for_scenario(&scenario, &config);
         if !runtime_status.ready {
             if !silent {
@@ -217,6 +222,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             &scenario.fixtures,
             SandboxOptions {
                 keep: opts.keep_sandbox,
+                setup_timeout,
                 skill: skill.install.as_ref().map(|install| SkillInstall {
                     name: install.name.clone(),
                     dir_path: install.dir_path.clone(),
@@ -355,6 +361,19 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     } else {
         Ok(2)
     }
+}
+
+fn effective_setup_timeout(
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> Duration {
+    let seconds = opts
+        .setup_timeout_seconds
+        .or(scenario.fixtures.setup_timeout_seconds)
+        .or(config.defaults.setup_timeout_seconds)
+        .unwrap_or(crate::config::DEFAULT_SETUP_TIMEOUT_SECONDS);
+    Duration::from_secs(seconds)
 }
 
 #[derive(Debug, serde::Serialize)]

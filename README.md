@@ -95,6 +95,7 @@ skills_dir: ./skills
 defaults:
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
+  setup_timeout_seconds: 60
   # Optional for ACP:
   # runtime: acp
   # agent: gemini
@@ -155,6 +156,7 @@ ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --model gpt-5-codex --mode plan --reasoning high
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-log ./acp-logs
+ai-tester run --file ./scenario.yaml --setup-timeout 10
 ai-tester run --dir ./prompts --runtime codex
 
 # Choose output format (default: live events + summary)
@@ -360,6 +362,7 @@ fixtures:
 
   setup_commands:
     - git tag v0.1.0
+  setup_timeout_seconds: 30
 
   env:
     MY_FLAG: "1"
@@ -378,6 +381,13 @@ Order of operations:
 9. Run `setup_commands`.
 
 `setup_commands` run through `cmd /C` on Windows and `/bin/sh -c` on Unix.
+Each setup command has its own timeout. The default is 60 seconds; configure it
+with `defaults.setup_timeout_seconds`, override it per scenario with
+`fixtures.setup_timeout_seconds`, or override both with
+`ai-tester run --setup-timeout <seconds>`. Precedence is CLI > scenario fixtures
+> project defaults > 60. Values must be positive. On timeout, `ai-tester` kills
+the whole setup process tree and reports the command plus stdout/stderr previews.
+
 `fixtures.env` is scenario-scoped: it is applied to setup commands and runtime
 subprocesses for Claude, Codex, and ACP. Precedence is predictable:
 

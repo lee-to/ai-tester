@@ -68,6 +68,9 @@ impl Scenario {
                 bail!("token_budget must be positive");
             }
         }
+        if self.fixtures.setup_timeout_seconds == Some(0) {
+            bail!("fixtures.setup_timeout_seconds must be positive");
+        }
         for file in self
             .fixtures
             .files_committed
@@ -232,6 +235,7 @@ pub struct Fixtures {
     pub files_unstaged: Vec<FixtureFile>,
     #[serde(default)]
     pub setup_commands: Vec<String>,
+    pub setup_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
