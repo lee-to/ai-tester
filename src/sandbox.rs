@@ -37,7 +37,7 @@ pub struct SkillInstall {
     pub dir_path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Sandbox {
     pub path: PathBuf,
     pub skill_install_path: Option<PathBuf>,
@@ -51,6 +51,14 @@ impl Sandbox {
         }
         fs::remove_dir_all(&self.path)
             .with_context(|| format!("remove sandbox {}", self.path.display()))
+    }
+}
+
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // Drop cannot return cleanup errors. Normal run paths still call cleanup()
+        // explicitly so removal failures can be reported to the caller.
+        let _ = self.cleanup();
     }
 }
 

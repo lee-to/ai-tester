@@ -200,6 +200,94 @@ fn cli_run_setup_timeout_cli_overrides_scenario_timeout() {
 }
 
 #[test]
+fn cli_run_cleans_sandbox_when_trace_write_fails() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "runs_dir: ./runs-file\n",
+    )
+    .expect("config written");
+    fs::write(tmp.path().join("runs-file"), "not a directory").expect("runs file written");
+    let scenario_name = "raii-clean-trace-error";
+    remove_ai_tester_temp_dirs(scenario_name);
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        format!(
+            "scenario: {scenario_name}\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n"
+        ),
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains(scenario_name));
+
+    assert!(
+        ai_tester_temp_dirs(scenario_name).is_empty(),
+        "sandbox should be dropped after trace write error"
+    );
+}
+
+#[test]
+fn cli_run_keep_sandbox_preserves_sandbox_when_trace_write_fails() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "runs_dir: ./runs-file\n",
+    )
+    .expect("config written");
+    fs::write(tmp.path().join("runs-file"), "not a directory").expect("runs file written");
+    let scenario_name = "raii-keep-trace-error";
+    remove_ai_tester_temp_dirs(scenario_name);
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        format!(
+            "scenario: {scenario_name}\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n"
+        ),
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--keep-sandbox",
+            "--quiet",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains(scenario_name));
+
+    let sandboxes = ai_tester_temp_dirs(scenario_name);
+    assert!(
+        !sandboxes.is_empty(),
+        "--keep-sandbox should preserve sandbox after trace write error"
+    );
+    for path in sandboxes {
+        fs::remove_dir_all(path).expect("kept sandbox removed by test cleanup");
+    }
+}
+
+#[test]
 fn cli_run_file_accepts_scenario_path_without_yaml_extension() {
     let tmp = TempDir::new().expect("temp dir");
     let prompts = tmp.path().join("prompts");
@@ -2991,6 +3079,26 @@ fn join_path_prefix(bin_dir: &Path, old_path: &std::ffi::OsStr) -> std::ffi::OsS
     out.push(sep);
     out.push(old_path);
     out
+}
+
+fn ai_tester_temp_dirs(scenario_name: &str) -> Vec<std::path::PathBuf> {
+    let prefix = format!("ai-tester-{scenario_name}-");
+    std::fs::read_dir(std::env::temp_dir())
+        .into_iter()
+        .flat_map(|entries| entries.filter_map(Result::ok))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect()
+}
+
+fn remove_ai_tester_temp_dirs(scenario_name: &str) {
+    for path in ai_tester_temp_dirs(scenario_name) {
+        let _ = fs::remove_dir_all(path);
+    }
 }
 
 struct TraceSeed<'a> {

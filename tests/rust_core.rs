@@ -109,6 +109,40 @@ fn fixtures_env_overrides_host_env_for_setup_commands() {
 }
 
 #[test]
+fn sandbox_drop_removes_directory_when_not_kept() {
+    let sandbox = create_sandbox(
+        "drop-cleanup",
+        &Fixtures::default(),
+        SandboxOptions::default(),
+    )
+    .expect("sandbox creates");
+    let path = sandbox.path.clone();
+
+    drop(sandbox);
+
+    assert!(!path.exists(), "sandbox should be removed by Drop");
+}
+
+#[test]
+fn sandbox_drop_preserves_directory_when_kept() {
+    let sandbox = create_sandbox(
+        "drop-keep",
+        &Fixtures::default(),
+        SandboxOptions {
+            keep: true,
+            ..Default::default()
+        },
+    )
+    .expect("sandbox creates");
+    let path = sandbox.path.clone();
+
+    drop(sandbox);
+
+    assert!(path.exists(), "kept sandbox should survive Drop");
+    fs::remove_dir_all(path).expect("kept sandbox removed by test cleanup");
+}
+
+#[test]
 fn fixtures_setup_timeout_rejects_zero() {
     let err = Scenario::from_yaml_str(
         "scenario: timeout-zero\nsystem_prompt: Body\nfixtures:\n  setup_timeout_seconds: 0\n",

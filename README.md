@@ -209,11 +209,12 @@ ai-tester run <skill> --format markdown > report.md
 
 ### `sandbox-prune`
 
-Removes orphan `ai-tester-*` sandbox directories left behind in the system temp
-directory by crashed runs or `--keep-sandbox`. Runs as a **dry run by default** —
-it lists what would be deleted; pass `--yes` to actually remove them. Use
-`--min-age <seconds>` (default `60`) to only prune sandboxes older than the given
-age, so active runs are never touched.
+Normal runs clean their sandbox automatically when the scenario scope exits.
+`sandbox-prune` is housekeeping for orphan `ai-tester-*` sandbox directories left
+behind by process crashes/aborts or by explicit `--keep-sandbox`. It runs as a
+**dry run by default** — it lists what would be deleted; pass `--yes` to actually
+remove them. Use `--min-age <seconds>` (default `60`) to only prune sandboxes
+older than the given age, so active runs are never touched.
 
 ```bash
 ai-tester sandbox-prune              # dry run: list orphans

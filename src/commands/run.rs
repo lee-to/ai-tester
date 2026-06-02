@@ -285,7 +285,6 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                         );
                     }
                 }
-                let _ = sandbox.cleanup();
                 runtime_errors += 1;
                 continue;
             }
