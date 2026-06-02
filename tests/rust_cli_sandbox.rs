@@ -11,6 +11,7 @@ use assert_cmd::Command;
 use chrono::{DateTime, Utc};
 use predicates::prelude::*;
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 #[test]
@@ -591,6 +592,58 @@ fn cli_run_with_fake_codex_writes_trace_and_evaluates_assertions() {
 }
 
 #[test]
+fn cli_run_fixture_env_reaches_codex_runtime() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex_requires_fixture_env(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: codex-fixture-env\nsystem_prompt: You are helpful.\nfixtures:\n  env:\n    MY_FLAG: fixture\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .env("MY_FLAG", "host")
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+}
+
+#[test]
+fn cli_run_fixture_env_reaches_claude_runtime() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_claude_requires_fixture_env(&bin_dir);
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: claude-fixture-env\nsystem_prompt: You are helpful.\nfixtures:\n  env:\n    MY_FLAG: fixture\nrunner:\n  runtime: claude\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .env("MY_FLAG", "host")
+        .args(["run", "--file", scenario.to_str().unwrap(), "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
+}
+
+#[test]
 fn cli_run_with_fake_acp_writes_trace_and_evaluates_assertions() {
     let tmp = TempDir::new().expect("temp dir");
     let bin_dir = tmp.path().join("bin");
@@ -641,6 +694,44 @@ fn cli_run_with_fake_acp_writes_trace_and_evaluates_assertions() {
         trace["turns"][0]["toolCalls"][0]["input"]["_acpTitle"],
         "Run tests"
     );
+}
+
+#[test]
+fn cli_run_fixture_env_reaches_acp_agent_and_terminal_with_precedence() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_acp_env_precedence(&bin_dir);
+    fs::write(
+        tmp.path().join(".ai-tester.yaml"),
+        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-env\n    args: []\n    env:\n      MY_FLAG: agent\n",
+    )
+    .expect("config written");
+
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: acp-fixture-env\nsystem_prompt: You are helpful.\nfixtures:\n  env:\n    MY_FLAG: fixture\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("scenario written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .env("MY_FLAG", "host")
+        .args([
+            "run",
+            "--file",
+            scenario.to_str().unwrap(),
+            "--quiet",
+            "--idle-warn",
+            "5",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("PASS"));
 }
 
 #[test]
@@ -1003,7 +1094,7 @@ mcp_servers:
     let scenario = tmp.path().join("scenario.yaml");
     fs::write(
         &scenario,
-        "scenario: fake-acp-transcript\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+        "scenario: fake-acp-transcript\nsystem_prompt: You are helpful.\nfixtures:\n  env:\n    TRACE_SECRET: fixture-transcript-secret\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
     )
     .expect("scenario written");
 
@@ -1039,6 +1130,7 @@ mcp_servers:
     assert!(!transcript.contains("acp-agent-secret"));
     assert!(!transcript.contains("mcp-secret"));
     assert!(!transcript.contains("stderr-secret"));
+    assert!(!transcript.contains("fixture-transcript-secret"));
 }
 
 #[test]
@@ -1085,8 +1177,16 @@ fn cli_run_with_fake_acp_invalid_stdout_reports_transcript_path() {
         .collect::<Result<Vec<_>, _>>()
         .expect("log entries");
     assert_eq!(transcript_files.len(), 1);
-    let transcript = fs::read_to_string(transcript_files[0].path()).expect("transcript readable");
-    assert!(transcript.contains("not-json"));
+    let transcript_path = transcript_files[0].path();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let transcript = loop {
+        let transcript = fs::read_to_string(&transcript_path).expect("transcript readable");
+        if transcript.contains("not-json") || Instant::now() >= deadline {
+            break transcript;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(transcript.contains("not-json"), "transcript: {transcript}");
     assert!(transcript.contains("<redacted>"));
     assert!(!transcript.contains("invalid-secret"));
     assert!(!transcript.contains("bad-secret"));
@@ -1447,6 +1547,49 @@ echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens
     }
 }
 
+fn write_fake_codex_requires_fixture_env(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let path = bin_dir.join("codex.cmd");
+        fs::write(
+            path,
+            "@echo off\r\n\
+if not \"%MY_FLAG%\"==\"fixture\" (echo missing fixture env: %MY_FLAG% 1>&2 && exit /b 3)\r\n\
+:check_args\r\n\
+if \"%~1\"==\"\" goto after_args\r\n\
+if \"%~1\"==\"-a\" (echo unexpected legacy approval flag 1>&2 && exit /b 2)\r\n\
+shift\r\n\
+goto check_args\r\n\
+:after_args\r\n\
+echo {\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}\r\n\
+echo {\"type\":\"turn.started\"}\r\n\
+echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\r\n\
+echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}\r\n",
+        )
+        .expect("fake codex env written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("codex");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+if [ \"$MY_FLAG\" != \"fixture\" ]; then echo \"missing fixture env: $MY_FLAG\" >&2; exit 3; fi\n\
+case \" $* \" in *\" -a \"*) echo 'unexpected legacy approval flag' >&2; exit 2;; esac\n\
+cat >/dev/null\n\
+echo '{\"type\":\"thread.started\",\"thread_id\":\"fake-thread\"}'\n\
+echo '{\"type\":\"turn.started\"}'\n\
+echo '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n\
+echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cached_input_tokens\":0}}'\n",
+        )
+        .expect("fake codex env written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
 fn write_fake_codex_two_turns(bin_dir: &Path) {
     #[cfg(windows)]
     {
@@ -1513,6 +1656,35 @@ echo '{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\
 echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}'\n",
         )
         .expect("fake claude written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_claude_requires_fixture_env(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let path = bin_dir.join("claude.cmd");
+        fs::write(
+            path,
+            "@echo off\r\n\
+if not \"%MY_FLAG%\"==\"fixture\" (echo missing fixture env: %MY_FLAG% 1>&2 && exit /b 3)\r\n\
+echo {\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\r\n",
+        )
+        .expect("fake claude env written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("claude");
+        fs::write(
+            &path,
+            "#!/bin/sh\n\
+if [ \"$MY_FLAG\" != \"fixture\" ]; then echo \"missing fixture env: $MY_FLAG\" >&2; exit 3; fi\n\
+echo '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}'\n",
+        )
+        .expect("fake claude env written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
@@ -1691,6 +1863,211 @@ done
             ),
         )
         .expect("fake acp written");
+        let mut perms = fs::metadata(&path).expect("metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(path, perms).expect("chmod");
+    }
+}
+
+fn write_fake_acp_env_precedence(bin_dir: &Path) {
+    #[cfg(windows)]
+    {
+        let cmd_path = bin_dir.join("fake-acp-env.cmd");
+        let ps1_path = bin_dir.join("fake-acp-env.ps1");
+        fs::write(
+            cmd_path,
+            "@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0fake-acp-env.ps1\"\r\n",
+        )
+        .expect("fake acp env wrapper written");
+        fs::write(
+            ps1_path,
+            r#"
+if ($env:MY_FLAG -ne "agent") {
+    [Console]::Error.WriteLine("expected ACP agent env 'agent', got '$env:MY_FLAG'")
+    exit 3
+}
+
+function Write-Json($value) {
+    [Console]::Out.WriteLine(($value | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
+
+function Send-Request($id, $method, $params) {
+    Write-Json @{
+        jsonrpc = "2.0"
+        id = $id
+        method = $method
+        params = $params
+    }
+    $responseLine = [Console]::In.ReadLine()
+    if ([string]::IsNullOrWhiteSpace($responseLine)) {
+        return $null
+    }
+    return $responseLine | ConvertFrom-Json
+}
+
+function Assert-TerminalOutput($actual, $expected, $label) {
+    $text = [string]$actual
+    if ($text.Trim() -ne $expected) {
+        [Console]::Error.WriteLine("$label expected '$expected', got '$text'")
+        exit 4
+    }
+}
+
+$sessionCwd = $null
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+        continue
+    }
+    $message = $line | ConvertFrom-Json
+    if ($message.method -eq "initialize") {
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{
+                protocolVersion = 1
+                agentCapabilities = @{}
+                authMethods = @()
+                agentInfo = @{ name = "fake-acp-env"; version = "1.0.0" }
+            }
+        }
+    } elseif ($message.method -eq "session/new") {
+        $sessionCwd = [string]$message.params.cwd
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ sessionId = "s1"; configOptions = @() }
+        }
+    } elseif ($message.method -eq "session/prompt") {
+        $default = Send-Request "term-create-default" "terminal/create" @{
+            sessionId = "s1"
+            command = "cmd"
+            args = @("/C", "echo %MY_FLAG%")
+            cwd = $sessionCwd
+            outputByteLimit = 1024
+        }
+        $defaultId = [string]$default.result.terminalId
+        $null = Send-Request "term-wait-default" "terminal/wait_for_exit" @{
+            sessionId = "s1"
+            terminalId = $defaultId
+        }
+        $defaultOutput = Send-Request "term-output-default" "terminal/output" @{
+            sessionId = "s1"
+            terminalId = $defaultId
+        }
+        Assert-TerminalOutput $defaultOutput.result.output "fixture" "default terminal env"
+
+        $override = Send-Request "term-create-override" "terminal/create" @{
+            sessionId = "s1"
+            command = "cmd"
+            args = @("/C", "echo %MY_FLAG%")
+            env = @(@{ name = "MY_FLAG"; value = "terminal" })
+            cwd = $sessionCwd
+            outputByteLimit = 1024
+        }
+        $overrideId = [string]$override.result.terminalId
+        $null = Send-Request "term-wait-override" "terminal/wait_for_exit" @{
+            sessionId = "s1"
+            terminalId = $overrideId
+        }
+        $overrideOutput = Send-Request "term-output-override" "terminal/output" @{
+            sessionId = "s1"
+            terminalId = $overrideId
+        }
+        Assert-TerminalOutput $overrideOutput.result.output "terminal" "override terminal env"
+
+        Write-Json @{
+            jsonrpc = "2.0"
+            method = "session/update"
+            params = @{
+                sessionId = "s1"
+                update = @{
+                    sessionUpdate = "agent_message_chunk"
+                    content = @{ type = "text"; text = "done" }
+                }
+            }
+        }
+        Write-Json @{
+            jsonrpc = "2.0"
+            id = $message.id
+            result = @{ stopReason = "end_turn" }
+        }
+    } elseif ($message.method -eq "session/close") {
+        Write-Json @{ jsonrpc = "2.0"; id = $message.id; result = @{} }
+        exit 0
+    }
+}
+"#,
+        )
+        .expect("fake acp env script written");
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = bin_dir.join("fake-acp-env");
+        fs::write(
+            &path,
+            r#"#!/bin/sh
+if [ "$MY_FLAG" != "agent" ]; then
+  echo "expected ACP agent env 'agent', got '$MY_FLAG'" >&2
+  exit 3
+fi
+
+session_cwd=""
+response=""
+
+send_request() {
+  printf '%s\n' "$1"
+  IFS= read -r response
+}
+
+assert_output() {
+  actual="$1"
+  expected="$2"
+  label="$3"
+  if [ "$actual" != "$expected" ]; then
+    echo "$label expected '$expected', got '$actual'" >&2
+    exit 4
+  fi
+}
+
+while IFS= read -r line || [ -n "$line" ]; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
+  case "$line" in
+    *'"method":"initialize"'*|*'"method": "initialize"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-env\",\"version\":\"1.0.0\"}}}"
+      ;;
+    *'"method":"session/new"'*|*'"method": "session/new"'*)
+      session_cwd=$(printf '%s' "$line" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
+      ;;
+    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-default\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"printf %s \\$MY_FLAG\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
+      terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-default\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-default\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+      output=$(printf '%s' "$response" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
+      assert_output "$output" "fixture" "default terminal env"
+
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-override\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"printf %s \\$MY_FLAG\"],\"env\":[{\"name\":\"MY_FLAG\",\"value\":\"terminal\"}],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
+      terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-override\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-override\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
+      output=$(printf '%s' "$response" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
+      assert_output "$output" "terminal" "override terminal env"
+
+      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+      ;;
+    *'"method":"session/close"'*|*'"method": "session/close"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+      exit 0
+      ;;
+  esac
+done
+"#,
+        )
+        .expect("fake acp env written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(path, perms).expect("chmod");
@@ -1886,7 +2263,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             $created = Send-Request "term-create-1" "terminal/create" @{
                 sessionId = "s1"
                 command = "powershell"
-                args = @("-NoProfile", "-Command", "Start-Sleep -Seconds 5")
+                args = @("-NoProfile", "-Command", "Start-Sleep -Seconds 2")
                 cwd = $sessionCwd
                 outputByteLimit = 1024
             }
@@ -1968,7 +2345,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         output_path="$session_cwd/notes/output.txt"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-read-1\",\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$input_path\",\"line\":1,\"limit\":1}}"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-write-1\",\"method\":\"fs/write_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$output_path\",\"content\":\"written from acp\n\"}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 5\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 2\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
         terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-1\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-1\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
@@ -2398,7 +2775,7 @@ function Write-Json($value) {
     [Console]::Out.Flush()
 }
 
-[Console]::Error.WriteLine("Authorization: Bearer stderr-secret ACP_TOKEN=$env:ACP_TOKEN")
+[Console]::Error.WriteLine("Authorization: Bearer stderr-secret ACP_TOKEN=$env:ACP_TOKEN TRACE_SECRET=$env:TRACE_SECRET")
 [Console]::Error.Flush()
 
 while ($null -ne ($line = [Console]::In.ReadLine())) {
@@ -2456,7 +2833,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         fs::write(
             &path,
             r#"#!/bin/sh
-echo "Authorization: Bearer stderr-secret ACP_TOKEN=$ACP_TOKEN" >&2
+echo "Authorization: Bearer stderr-secret ACP_TOKEN=$ACP_TOKEN TRACE_SECRET=$TRACE_SECRET" >&2
 while IFS= read -r line || [ -n "$line" ]; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
   case "$line" in
@@ -2500,9 +2877,24 @@ fn write_fake_acp_invalid_stdout(bin_dir: &Path) {
             r#"
 [Console]::Error.WriteLine("TOKEN=bad-secret")
 [Console]::Error.Flush()
+$line = [Console]::In.ReadLine()
+if ($line) {
+    $message = $line | ConvertFrom-Json
+    [Console]::Out.WriteLine((@{
+        jsonrpc = "2.0"
+        id = $message.id
+        result = @{
+            protocolVersion = 1
+            agentCapabilities = @{}
+            authMethods = @()
+            agentInfo = @{ name = "fake-acp-invalid"; version = "1.0.0" }
+        }
+    } | ConvertTo-Json -Compress -Depth 32))
+    [Console]::Out.Flush()
+}
 [Console]::Out.WriteLine("not-json Authorization: Bearer invalid-secret")
 [Console]::Out.Flush()
-Start-Sleep -Milliseconds 100
+Start-Sleep -Seconds 1
 "#,
         )
         .expect("fake acp invalid script written");
@@ -2515,8 +2907,11 @@ Start-Sleep -Milliseconds 100
             &path,
             "#!/bin/sh\n\
 echo 'TOKEN=bad-secret' >&2\n\
+IFS= read -r line\n\
+id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([^,}]*\\).*/\\1/p')\n\
+echo \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$id,\\\"result\\\":{\\\"protocolVersion\\\":1,\\\"agentCapabilities\\\":{},\\\"authMethods\\\":[],\\\"agentInfo\\\":{\\\"name\\\":\\\"fake-acp-invalid\\\",\\\"version\\\":\\\"1.0.0\\\"}}}\"\n\
 echo 'not-json Authorization: Bearer invalid-secret'\n\
-sleep 0.1\n",
+sleep 1\n",
         )
         .expect("fake acp invalid written");
         let mut perms = fs::metadata(&path).expect("metadata").permissions();

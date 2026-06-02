@@ -378,6 +378,13 @@ Order of operations:
 9. Run `setup_commands`.
 
 `setup_commands` run through `cmd /C` on Windows and `/bin/sh -c` on Unix.
+`fixtures.env` is scenario-scoped: it is applied to setup commands and runtime
+subprocesses for Claude, Codex, and ACP. Precedence is predictable:
+
+- Setup, Claude, and Codex: host env < `fixtures.env`.
+- ACP agent process: host env < `fixtures.env` < `acp_agents.<name>.env`.
+- ACP terminal bridge: host env < `fixtures.env` < `terminal/create.env`.
+- MCP server env/header config is forwarded through ACP session config and is not merged with `fixtures.env`.
 
 ## Assertions
 

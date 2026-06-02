@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -593,6 +593,7 @@ pub struct RuntimeRunRequest {
     pub skill_install_rel_path: Option<String>,
     pub progress: bool,
     pub idle_warn_seconds: u64,
+    pub scenario_env: BTreeMap<String, String>,
     pub acp_agent_name: Option<String>,
     pub acp_agent: Option<crate::config::ResolvedAcpAgent>,
     pub mcp_servers: Vec<crate::config::NamedMcpServerConfig>,
@@ -647,7 +648,7 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
         };
         let stdout = if idx == 0 {
             let args = build_codex_args(&req);
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
         } else {
             let session = session_id.clone().unwrap_or_else(|| "--last".to_string());
             let args = vec![
@@ -657,7 +658,7 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
                 "--json".to_string(),
                 "-".to_string(),
             ];
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
         };
         let parsed = parse_codex_jsonl(&stdout, max_turns, max_turns_user_set)?;
         if session_id.is_none() {
@@ -719,6 +720,7 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             &args,
             Some(&req.cwd),
             None,
+            &req.scenario_env,
             if req.progress {
                 ProcessOutputMode::StreamJsonl
             } else {
@@ -748,12 +750,14 @@ fn run_process_with_stdin_jsonl(
     args: &[String],
     stdin: &str,
     progress: bool,
+    env: &BTreeMap<String, String>,
 ) -> anyhow::Result<String> {
     run_process(
         command,
         args,
         None,
         Some(stdin),
+        env,
         if progress {
             ProcessOutputMode::StreamJsonl
         } else {
@@ -767,12 +771,14 @@ fn run_process(
     args: &[String],
     cwd: Option<&std::path::Path>,
     stdin: Option<&str>,
+    env: &BTreeMap<String, String>,
     output_mode: ProcessOutputMode,
 ) -> anyhow::Result<String> {
     let mut process = platform_command(command, args);
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
+    process.envs(env);
     let mut child = process
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1654,6 +1660,7 @@ mod tests {
             skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
             progress: false,
             idle_warn_seconds: 30,
+            scenario_env: BTreeMap::new(),
             acp_agent_name: None,
             acp_agent: None,
             mcp_servers: Vec::new(),

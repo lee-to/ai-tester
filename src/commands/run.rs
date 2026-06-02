@@ -259,6 +259,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .map(|p| p.to_string_lossy().to_string()),
             progress: verbose,
             idle_warn_seconds: opts.idle_warn_seconds,
+            scenario_env: scenario.fixtures.env.clone(),
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
             mcp_servers,
@@ -714,15 +715,26 @@ fn build_acp_transcript_config(
     );
     Ok(Some(crate::runtime::AcpTranscriptConfig {
         path: log_dir.join(file_name),
-        redaction_values: collect_acp_redaction_values(acp_agent, mcp_servers),
+        redaction_values: collect_acp_redaction_values(
+            acp_agent,
+            &scenario.fixtures.env,
+            mcp_servers,
+        ),
     }))
 }
 
 fn collect_acp_redaction_values(
     acp_agent: &Option<crate::config::ResolvedAcpAgent>,
+    scenario_env: &std::collections::BTreeMap<String, String>,
     mcp_servers: &[crate::config::NamedMcpServerConfig],
 ) -> Vec<String> {
     let mut values = Vec::new();
+    values.extend(
+        scenario_env
+            .values()
+            .filter(|value| !value.is_empty())
+            .cloned(),
+    );
     if let Some(env) = acp_agent
         .as_ref()
         .and_then(crate::config::ResolvedAcpAgent::configured_env)

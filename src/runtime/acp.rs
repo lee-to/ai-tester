@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -66,7 +66,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         .map(AcpTranscriptLogger::new)
         .transpose()?
         .map(Arc::new);
-    let mut acp_agent = build_acp_agent(&agent_config)?;
+    let mut acp_agent = build_acp_agent(&agent_config, &req.scenario_env)?;
     if let Some(logger) = &transcript_logger {
         let logger_for_debug = Arc::clone(logger);
         acp_agent = acp_agent.with_debug(move |line, direction| {
@@ -80,6 +80,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let client_bridge = Arc::new(AcpClientBridge::new(
         process_cwd.clone(),
         terminal_wait_timeout(idle_timeout),
+        req.scenario_env.clone(),
     )?);
     let policy = Arc::new(PermissionPolicy::from_runner(
         &req.scenario.runner,
@@ -1193,11 +1194,15 @@ fn acp_tool_call_label(title: &str, kind: &str, raw_input: Option<&Value>) -> St
     }
 }
 
-fn build_acp_agent(agent: &ResolvedAcpAgent) -> anyhow::Result<AcpAgent> {
+fn build_acp_agent(
+    agent: &ResolvedAcpAgent,
+    scenario_env: &BTreeMap<String, String>,
+) -> anyhow::Result<AcpAgent> {
     match &agent.launch {
         AcpAgentLaunch::Configured(config) => {
-            let mut args = config
-                .env
+            let mut merged_env = scenario_env.clone();
+            merged_env.extend(config.env.clone());
+            let mut args = merged_env
                 .iter()
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>();
@@ -1207,12 +1212,18 @@ fn build_acp_agent(agent: &ResolvedAcpAgent) -> anyhow::Result<AcpAgent> {
             args.extend(config.args.clone());
             AcpAgent::from_args(args).map_err(|err| anyhow::anyhow!("{err}"))
         }
-        AcpAgentLaunch::Builtin(profile) => build_builtin_acp_agent(*profile),
+        AcpAgentLaunch::Builtin(profile) => build_builtin_acp_agent(*profile, scenario_env),
     }
 }
 
 #[cfg(not(windows))]
-fn build_builtin_acp_agent(profile: BuiltinAcpAgentProfile) -> anyhow::Result<AcpAgent> {
+fn build_builtin_acp_agent(
+    profile: BuiltinAcpAgentProfile,
+    scenario_env: &BTreeMap<String, String>,
+) -> anyhow::Result<AcpAgent> {
+    if !scenario_env.is_empty() {
+        return build_builtin_acp_agent_with_env(profile, scenario_env);
+    }
     Ok(match profile {
         BuiltinAcpAgentProfile::Gemini => AcpAgent::google_gemini(),
         BuiltinAcpAgentProfile::ZedClaude => AcpAgent::zed_claude_code(),
@@ -1221,8 +1232,19 @@ fn build_builtin_acp_agent(profile: BuiltinAcpAgentProfile) -> anyhow::Result<Ac
 }
 
 #[cfg(windows)]
-fn build_builtin_acp_agent(profile: BuiltinAcpAgentProfile) -> anyhow::Result<AcpAgent> {
+fn build_builtin_acp_agent(
+    profile: BuiltinAcpAgentProfile,
+    scenario_env: &BTreeMap<String, String>,
+) -> anyhow::Result<AcpAgent> {
+    build_builtin_acp_agent_with_env(profile, scenario_env)
+}
+
+fn build_builtin_acp_agent_with_env(
+    profile: BuiltinAcpAgentProfile,
+    env: &BTreeMap<String, String>,
+) -> anyhow::Result<AcpAgent> {
     let mut args = Vec::new();
+    args.extend(env.iter().map(|(key, value)| format!("{key}={value}")));
     args.push(
         resolve_command_path(profile.command()).unwrap_or_else(|| profile.command().to_string()),
     );

@@ -7,7 +7,8 @@ use ai_tester::runtime::{
     parse_claude_jsonl, parse_claude_jsonl_with_user_responses, parse_codex_jsonl,
     runtime_status_for_scenario,
 };
-use ai_tester::scenario::{load_scenario_file, AssertionSpec, Scenario, UserResponse};
+use ai_tester::sandbox::{create_sandbox, SandboxOptions};
+use ai_tester::scenario::{load_scenario_file, AssertionSpec, Fixtures, Scenario, UserResponse};
 use ai_tester::skill::allowed_tools::tokenize_allowed_tools;
 use ai_tester::skill::parse_skill_md;
 use ai_tester::trace::{ToolCallRecord, TraceRecord, Turn};
@@ -16,6 +17,7 @@ use ai_tester::util::path::{
 };
 use ai_tester::util::redaction::Redactor;
 use ai_tester::util::regex::compile_pattern;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -51,6 +53,58 @@ fn path_helper_resolves_only_real_paths_inside_sandbox() {
     let err = resolve_existing_inside(tmp.path(), Path::new("../escape.txt"))
         .expect_err("parent escape rejected");
     assert!(err.to_string().contains("escapes sandbox"));
+}
+
+#[test]
+fn fixtures_env_is_visible_to_setup_commands() {
+    let mut env = BTreeMap::new();
+    env.insert("AI_TESTER_SETUP_FLAG".to_string(), "fixture".to_string());
+    let command = if cfg!(windows) {
+        "echo %AI_TESTER_SETUP_FLAG%> flag.txt"
+    } else {
+        "printf %s \"$AI_TESTER_SETUP_FLAG\" > flag.txt"
+    };
+    let fixtures = Fixtures {
+        setup_commands: vec![command.to_string()],
+        env,
+        ..Default::default()
+    };
+
+    let sandbox =
+        create_sandbox("setup-env", &fixtures, SandboxOptions::default()).expect("sandbox creates");
+    let flag = fs::read_to_string(sandbox.path.join("flag.txt")).expect("flag written");
+    assert_eq!(flag.trim(), "fixture");
+    sandbox.cleanup().expect("cleanup succeeds");
+}
+
+#[test]
+fn fixtures_env_overrides_host_env_for_setup_commands() {
+    let key = "AI_TESTER_SETUP_PRECEDENCE_FLAG";
+    let old = std::env::var_os(key);
+    std::env::set_var(key, "host");
+    let mut env = BTreeMap::new();
+    env.insert(key.to_string(), "fixture".to_string());
+    let command = if cfg!(windows) {
+        format!("echo %{key}%> flag.txt")
+    } else {
+        format!("printf %s \"${key}\" > flag.txt")
+    };
+    let fixtures = Fixtures {
+        setup_commands: vec![command],
+        env,
+        ..Default::default()
+    };
+
+    let sandbox = create_sandbox("setup-env-precedence", &fixtures, SandboxOptions::default())
+        .expect("sandbox creates");
+    let flag = fs::read_to_string(sandbox.path.join("flag.txt")).expect("flag written");
+    assert_eq!(flag.trim(), "fixture");
+    sandbox.cleanup().expect("cleanup succeeds");
+    if let Some(old) = old {
+        std::env::set_var(key, old);
+    } else {
+        std::env::remove_var(key);
+    }
 }
 
 #[cfg(windows)]

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -109,7 +110,7 @@ pub fn create_sandbox(
         }
 
         for command in &fixtures.setup_commands {
-            run_shell(&base, command)?;
+            run_shell(&base, command, &fixtures.env)?;
         }
 
         Ok::<_, anyhow::Error>(())
@@ -194,7 +195,7 @@ fn run_git_owned(cwd: &Path, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_shell(cwd: &Path, command: &str) -> anyhow::Result<()> {
+fn run_shell(cwd: &Path, command: &str, env: &BTreeMap<String, String>) -> anyhow::Result<()> {
     #[cfg(windows)]
     let mut child = {
         let mut cmd = Command::new("cmd");
@@ -207,7 +208,7 @@ fn run_shell(cwd: &Path, command: &str) -> anyhow::Result<()> {
         cmd.args(["-c", command]);
         cmd
     };
-    let output = child.current_dir(cwd).output()?;
+    let output = child.current_dir(cwd).envs(env).output()?;
     if !output.status.success() {
         bail!(
             "setup command failed: `{command}` - {}",

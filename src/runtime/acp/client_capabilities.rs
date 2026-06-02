@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -38,6 +38,7 @@ impl AcpClientBridge {
     pub(crate) fn new(
         sandbox_root: PathBuf,
         terminal_wait_timeout: Duration,
+        scenario_env: BTreeMap<String, String>,
     ) -> anyhow::Result<Self> {
         let sandbox_root = canonicalize_existing(&sandbox_root)?;
         Ok(Self {
@@ -45,7 +46,7 @@ impl AcpClientBridge {
             session_id: Mutex::new(None),
             records: Mutex::new(Vec::new()),
             next_record_id: AtomicU64::new(1),
-            terminal_manager: TerminalManager::new(terminal_wait_timeout),
+            terminal_manager: TerminalManager::new(terminal_wait_timeout, scenario_env),
         })
     }
 
@@ -303,14 +304,16 @@ struct TerminalManager {
     entries: Mutex<HashMap<String, Arc<TerminalEntry>>>,
     next_id: AtomicU64,
     wait_timeout: Duration,
+    scenario_env: BTreeMap<String, String>,
 }
 
 impl TerminalManager {
-    fn new(wait_timeout: Duration) -> Self {
+    fn new(wait_timeout: Duration, scenario_env: BTreeMap<String, String>) -> Self {
         Self {
             entries: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             wait_timeout,
+            scenario_env,
         }
     }
 
@@ -334,6 +337,7 @@ impl TerminalManager {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        process.envs(&self.scenario_env);
         for var in env {
             process.env(var.name, var.value);
         }
@@ -607,7 +611,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn bridge(root: &Path, wait_timeout: Duration) -> AcpClientBridge {
-        let bridge = AcpClientBridge::new(root.to_path_buf(), wait_timeout).expect("bridge");
+        let bridge = AcpClientBridge::new(root.to_path_buf(), wait_timeout, BTreeMap::new())
+            .expect("bridge");
         bridge.set_session_id("s1".to_string());
         bridge
     }
