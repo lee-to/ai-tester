@@ -720,6 +720,99 @@ fn tool_called_accepts_tool_pattern() {
 }
 
 #[test]
+fn invalid_regex_no_tool_called_tool_pattern_fails_assertion() {
+    let yaml = "scenario: invalid-pattern\nsystem_prompt: Body\nassertions:\n  - id: no-invalid-pattern\n    type: no_tool_called\n    tool_pattern: '['\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "no-invalid-pattern")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
+    assert!(result.detail.contains("invalid tool_pattern regex"));
+    assert!(result.detail.contains("["));
+}
+
+#[test]
+fn invalid_regex_no_tool_called_args_match_fails_assertion() {
+    let yaml = "scenario: invalid-args\nsystem_prompt: Body\nassertions:\n  - id: no-invalid-args\n    type: no_tool_called\n    tool: Bash\n    args_match:\n      command: '['\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "no-invalid-args")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
+    assert!(result.detail.contains("invalid args_match regex"));
+    assert!(result.detail.contains("command"));
+    assert!(result.detail.contains("["));
+}
+
+#[test]
+fn invalid_regex_tool_called_args_match_reports_diagnostic() {
+    let yaml = "scenario: invalid-tool-called-args\nsystem_prompt: Body\nassertions:\n  - id: call-invalid-args\n    type: tool_called\n    tool: Bash\n    args_match:\n      command: '['\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "call-invalid-args")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
+    assert!(result.detail.contains("invalid args_match regex"));
+    assert!(result.detail.contains("command"));
+    assert!(result.detail.contains("["));
+    assert!(!result.detail.contains("no `Bash` call matched"));
+}
+
+#[test]
+fn valid_no_tool_called_tool_pattern_matches_calls() {
+    let trace = TraceRecord::synthetic(
+        vec![Turn::assistant_with_tool(
+            "1",
+            "Bash",
+            serde_json::json!({"command": "git status"}),
+        )],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let assertions = vec![
+        AssertionSpec::NoToolCalled {
+            id: "no-write-pattern".to_string(),
+            weight: 1.0,
+            tool: None,
+            tool_pattern: Some("^Write$".to_string()),
+            args_match: None,
+        },
+        AssertionSpec::NoToolCalled {
+            id: "no-bash-pattern".to_string(),
+            weight: 1.0,
+            tool: None,
+            tool_pattern: Some("^Ba.*$".to_string()),
+            args_match: None,
+        },
+    ];
+
+    let results = evaluate_assertions(&assertions, &trace);
+    let no_write = results
+        .iter()
+        .find(|result| result.id == "no-write-pattern")
+        .expect("no-write result");
+    let no_bash = results
+        .iter()
+        .find(|result| result.id == "no-bash-pattern")
+        .expect("no-bash result");
+    assert!(no_write.pass, "{results:#?}");
+    assert!(!no_bash.pass, "{results:#?}");
+}
+
+#[test]
 fn no_output_contains_fails_when_final_output_matches() {
     let trace = TraceRecord::synthetic(Vec::new(), "WARN [+check] failed".to_string(), 1, None);
     let assertions = vec![AssertionSpec::no_output_contains(

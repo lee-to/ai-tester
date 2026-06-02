@@ -91,10 +91,21 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             let mut next_index = 0usize;
             let calls = all_tool_calls(trace);
             for step in sequence {
-                let found = calls[next_index..].iter().position(|call| {
-                    call.name == step.tool
-                        && args_match(step.args_match.as_ref(), &call.input).unwrap_or(false)
-                });
+                let args_matcher = match ArgsMatcher::new(step.args_match.as_ref()) {
+                    Ok(matcher) => matcher,
+                    Err(err) => {
+                        return base_result(
+                            id,
+                            "tool_call_sequence",
+                            false,
+                            *weight,
+                            invalid_args_match_detail(err),
+                        )
+                    }
+                };
+                let found = calls[next_index..]
+                    .iter()
+                    .position(|call| call.name == step.tool && args_matcher.matches(&call.input));
                 let Some(offset) = found else {
                     return base_result(
                         id,
@@ -121,11 +132,37 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             tool_pattern,
             args_match: expected_args,
         } => {
-            let pattern = tool_pattern.as_ref().and_then(|p| compile_pattern(p).ok());
+            let pattern = match tool_pattern.as_deref() {
+                Some(pattern) => match compile_pattern(pattern) {
+                    Ok(pattern) => Some(pattern),
+                    Err(err) => {
+                        return base_result(
+                            id,
+                            "no_tool_called",
+                            false,
+                            *weight,
+                            format!("invalid tool_pattern regex '{pattern}': {err}"),
+                        )
+                    }
+                },
+                None => None,
+            };
+            let args_matcher = match ArgsMatcher::new(expected_args.as_ref()) {
+                Ok(matcher) => matcher,
+                Err(err) => {
+                    return base_result(
+                        id,
+                        "no_tool_called",
+                        false,
+                        *weight,
+                        invalid_args_match_detail(err),
+                    )
+                }
+            };
             let matched = all_tool_calls(trace).into_iter().find(|call| {
                 let tool_ok = tool.as_ref().is_some_and(|t| call.name == *t)
                     || pattern.as_ref().is_some_and(|re| re.is_match(&call.name));
-                tool_ok && args_match(expected_args.as_ref(), &call.input).unwrap_or(false)
+                tool_ok && args_matcher.matches(&call.input)
             });
             if let Some(call) = matched {
                 base_result(
@@ -388,18 +425,30 @@ fn evaluate_tool_called(
                     "tool_called",
                     false,
                     weight,
-                    format!("invalid tool_pattern regex: {err}"),
+                    format!("invalid tool_pattern regex '{pattern}': {err}"),
                 )
             }
         },
         None => None,
+    };
+    let args_matcher = match ArgsMatcher::new(expected_args) {
+        Ok(matcher) => matcher,
+        Err(err) => {
+            return base_result(
+                id,
+                "tool_called",
+                false,
+                weight,
+                invalid_args_match_detail(err),
+            )
+        }
     };
     let matches = all_tool_calls(trace)
         .into_iter()
         .filter(|call| {
             let tool_ok = tool.is_some_and(|tool| call.name == tool)
                 || pattern.as_ref().is_some_and(|re| re.is_match(&call.name));
-            tool_ok && args_match(expected_args, &call.input).unwrap_or(false)
+            tool_ok && args_matcher.matches(&call.input)
         })
         .collect::<Vec<_>>();
     let pass = call_index
@@ -452,18 +501,49 @@ fn evaluate_token_budget(trace: &TraceRecord) -> Option<AssertionResult> {
     ))
 }
 
-fn args_match(expected: Option<&BTreeMap<String, String>>, input: &Value) -> anyhow::Result<bool> {
-    let Some(expected) = expected else {
-        return Ok(true);
-    };
-    for (field, pattern) in expected {
-        let actual = input.get(field).map(value_to_string).unwrap_or_default();
-        let re = compile_pattern(pattern)?;
-        if !re.is_match(&actual) {
-            return Ok(false);
+#[derive(Debug)]
+struct ArgsMatchRegexError {
+    field: String,
+    pattern: String,
+    error: String,
+}
+
+struct ArgsMatcher<'a> {
+    patterns: Vec<(&'a str, regex::Regex)>,
+}
+
+impl<'a> ArgsMatcher<'a> {
+    fn new(expected: Option<&'a BTreeMap<String, String>>) -> Result<Self, ArgsMatchRegexError> {
+        let Some(expected) = expected else {
+            return Ok(Self {
+                patterns: Vec::new(),
+            });
+        };
+        let mut patterns = Vec::with_capacity(expected.len());
+        for (field, pattern) in expected {
+            let re = compile_pattern(pattern).map_err(|err| ArgsMatchRegexError {
+                field: field.clone(),
+                pattern: pattern.clone(),
+                error: err.to_string(),
+            })?;
+            patterns.push((field.as_str(), re));
         }
+        Ok(Self { patterns })
     }
-    Ok(true)
+
+    fn matches(&self, input: &Value) -> bool {
+        self.patterns.iter().all(|(field, re)| {
+            let actual = input.get(*field).map(value_to_string).unwrap_or_default();
+            re.is_match(&actual)
+        })
+    }
+}
+
+fn invalid_args_match_detail(err: ArgsMatchRegexError) -> String {
+    format!(
+        "invalid args_match regex for '{}' ('{}'): {}",
+        err.field, err.pattern, err.error
+    )
 }
 
 fn value_to_string(value: &Value) -> String {
