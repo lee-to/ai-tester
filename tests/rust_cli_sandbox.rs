@@ -857,7 +857,7 @@ fn cli_run_with_fake_acp_writes_trace_and_evaluates_assertions() {
     let scenario = tmp.path().join("scenario.yaml");
     fs::write(
         &scenario,
-        "scenario: fake-acp\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: ran-command\n    type: tool_called\n    tool: execute\n    args_match:\n      command: \"cargo test\"\n",
+        "scenario: fake-acp\nsystem_prompt: You are helpful.\nrunner:\n  runtime: acp\n  agent: local\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n  - id: ran-command\n    type: tool_called\n    tool_kind: execute\n    title_pattern: \"Run tests\"\n    raw_input_match:\n      command: \"cargo test\"\n",
     )
     .expect("scenario written");
 

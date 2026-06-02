@@ -749,6 +749,151 @@ fn tool_called_capture_records_matched_field() {
 }
 
 #[test]
+fn args_match_supports_nested_dot_paths_json_pointer_and_missing_paths() {
+    let yaml = "scenario: nested-args\nsystem_prompt: Body\nassertions:\n  - id: top-level-command\n    type: tool_called\n    tool: Bash\n    args_match:\n      command: '^git status$'\n  - id: nested-dot-command\n    type: tool_called\n    tool: Bash\n    args_match:\n      rawInput.command: '^cargo test$'\n  - id: nested-pointer-command\n    type: tool_called\n    tool: Bash\n    args_match:\n      /rawInput/command: '^cargo test$'\n  - id: acp-location\n    type: tool_called\n    tool: execute\n    args_match:\n      _acpLocations.0.path: 'src/main.rs'\n  - id: missing-path-empty\n    type: tool_called\n    tool: Bash\n    args_match:\n      rawInput.missing: '^$'\n  - id: missing-path-non-empty\n    type: tool_called\n    tool: Bash\n    args_match:\n      rawInput.missing: 'required'\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "Bash",
+                serde_json::json!({
+                    "command": "git status",
+                    "rawInput": { "command": "cargo test" }
+                }),
+            ),
+            Turn::assistant_with_tool(
+                "2",
+                "execute",
+                serde_json::json!({
+                    "_acpLocations": [{ "path": "src/main.rs" }],
+                    "command": "cargo test"
+                }),
+            ),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    for id in [
+        "top-level-command",
+        "nested-dot-command",
+        "nested-pointer-command",
+        "acp-location",
+        "missing-path-empty",
+    ] {
+        let result = results
+            .iter()
+            .find(|result| result.id == id)
+            .expect("assertion result");
+        assert!(result.pass, "{id}: {results:#?}");
+    }
+    let missing_non_empty = results
+        .iter()
+        .find(|result| result.id == "missing-path-non-empty")
+        .expect("missing non-empty result");
+    assert!(!missing_non_empty.pass, "{results:#?}");
+}
+
+#[test]
+fn acp_friendly_matchers_match_tool_kind_title_and_raw_input() {
+    let yaml = "scenario: acp-friendly\nsystem_prompt: Body\nassertions:\n  - id: acp-flattened\n    type: tool_called\n    tool_kind: execute\n    title_pattern: '^Run tests$'\n    raw_input_match:\n      command: '^cargo test$'\n  - id: acp-wrapped\n    type: tool_called\n    tool_kind: execute\n    title_pattern: '^Run wrapped$'\n    raw_input_match:\n      command: '^cargo nextest$'\n  - id: no-rm-command\n    type: no_tool_called\n    tool_kind: execute\n    raw_input_match:\n      command: '^rm -rf'\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "execute",
+                serde_json::json!({
+                    "command": "cargo test",
+                    "_acpKind": "execute",
+                    "_acpTitle": "Run tests"
+                }),
+            ),
+            Turn::assistant_with_tool(
+                "2",
+                "execute",
+                serde_json::json!({
+                    "rawInput": { "command": "cargo nextest" },
+                    "_acpKind": "execute",
+                    "_acpTitle": "Run wrapped"
+                }),
+            ),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    for id in ["acp-flattened", "acp-wrapped", "no-rm-command"] {
+        let result = results
+            .iter()
+            .find(|result| result.id == id)
+            .expect("assertion result");
+        assert!(result.pass, "{id}: {results:#?}");
+    }
+}
+
+#[test]
+fn invalid_regex_nested_args_and_raw_input_match_report_field() {
+    let yaml = "scenario: invalid-nested-matchers\nsystem_prompt: Body\nassertions:\n  - id: invalid-nested-args\n    type: tool_called\n    tool: Bash\n    args_match:\n      rawInput.command: '['\n  - id: invalid-raw-input\n    type: tool_called\n    tool_kind: execute\n    raw_input_match:\n      command: '['\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let nested_args = results
+        .iter()
+        .find(|result| result.id == "invalid-nested-args")
+        .expect("nested args result");
+    assert!(!nested_args.pass, "{results:#?}");
+    assert!(nested_args.detail.contains("invalid args_match regex"));
+    assert!(nested_args.detail.contains("rawInput.command"));
+    assert!(nested_args.detail.contains("["));
+
+    let raw_input = results
+        .iter()
+        .find(|result| result.id == "invalid-raw-input")
+        .expect("raw input result");
+    assert!(!raw_input.pass, "{results:#?}");
+    assert!(raw_input.detail.contains("invalid raw_input_match regex"));
+    assert!(raw_input.detail.contains("command"));
+    assert!(raw_input.detail.contains("["));
+}
+
+#[test]
+fn tool_call_sequence_supports_acp_friendly_steps() {
+    let yaml = "scenario: acp-sequence\nsystem_prompt: Body\nassertions:\n  - id: tests-before-status\n    type: tool_call_sequence\n    sequence:\n      - tool_kind: execute\n        title_pattern: '^Run tests$'\n        raw_input_match:\n          command: '^cargo test$'\n      - tool: Bash\n        args_match:\n          command: '^git status$'\n";
+    let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "execute",
+                serde_json::json!({
+                    "command": "cargo test",
+                    "_acpKind": "execute",
+                    "_acpTitle": "Run tests"
+                }),
+            ),
+            Turn::assistant_with_tool("2", "Bash", serde_json::json!({"command": "git status"})),
+        ],
+        "done".to_string(),
+        2,
+        None,
+    );
+
+    let results = evaluate_assertions(&scenario.assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "tests-before-status")
+        .expect("sequence result");
+    assert!(result.pass, "{results:#?}");
+}
+
+#[test]
 fn tool_called_capture_truncates_and_uses_selected_call_index() {
     let yaml = "scenario: capture-index\nsystem_prompt: Body\nassertions:\n  - id: second-bash\n    type: tool_called\n    tool: Bash\n    call_index: 1\n    capture: [command]\n    capture_max_chars: 8\n";
     let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");
@@ -889,14 +1034,20 @@ fn valid_no_tool_called_tool_pattern_matches_calls() {
             weight: 1.0,
             tool: None,
             tool_pattern: Some("^Write$".to_string()),
+            tool_kind: None,
+            title_pattern: None,
             args_match: None,
+            raw_input_match: None,
         },
         AssertionSpec::NoToolCalled {
             id: "no-bash-pattern".to_string(),
             weight: 1.0,
             tool: None,
             tool_pattern: Some("^Ba.*$".to_string()),
+            tool_kind: None,
+            title_pattern: None,
             args_match: None,
+            raw_input_match: None,
         },
     ];
 

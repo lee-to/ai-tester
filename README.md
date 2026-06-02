@@ -413,7 +413,20 @@ subprocesses for Claude, Codex, and ACP. Precedence is predictable:
 - id: calls-codegraph
   type: tool_called
   tool_pattern: "^mcp__.*__codegraph_context$"
+
+- id: acp-runs-tests
+  type: tool_called
+  tool_kind: execute
+  title_pattern: "Run tests"
+  raw_input_match:
+    command: "cargo test"
 ```
+
+`tool_called` and `no_tool_called` must declare exactly one primary selector:
+`tool`, `tool_pattern`, or ACP-oriented `tool_kind`. `title_pattern` filters
+ACP calls by `_acpTitle`. `raw_input_match` matches ACP raw input fields: when
+the trace input contains `rawInput`, paths are resolved under it; otherwise they
+match the flattened ACP input.
 
 ### `tool_call_sequence`
 
@@ -429,12 +442,23 @@ subprocesses for Claude, Codex, and ACP. Precedence is predictable:
       args_match:
         command: "^git commit"
       capture: [command]
+    - tool_kind: execute
+      title_pattern: "Run tests"
+      raw_input_match:
+        command: "cargo test"
   capture_max_chars: 200
 ```
 
 `capture` stores top-level tool input fields from the matched tool call in the
 assertion result. Captures are included in JSON traces and shown in live and
 Markdown output. `capture_max_chars` truncates long captured values.
+
+`args_match` keys can address nested trace input fields. Keys starting with `/`
+use JSON Pointer, such as `/rawInput/command`. Other keys first try an exact
+top-level field for backward compatibility, then dot-path lookup with numeric
+array indexes, such as `rawInput.command` or `_acpLocations.0.path`. Use JSON
+Pointer for field names that contain literal dots. Missing paths are treated as
+an empty string, so `^$` matches an absent field and non-empty regexes do not.
 
 ### `no_tool_called`
 

@@ -282,7 +282,10 @@ pub enum AssertionSpec {
         weight: f64,
         tool: Option<String>,
         tool_pattern: Option<String>,
+        tool_kind: Option<String>,
+        title_pattern: Option<String>,
         args_match: Option<BTreeMap<String, String>>,
+        raw_input_match: Option<BTreeMap<String, String>>,
         call_index: Option<usize>,
         capture: Option<Vec<String>>,
         capture_max_chars: Option<usize>,
@@ -300,7 +303,10 @@ pub enum AssertionSpec {
         weight: f64,
         tool: Option<String>,
         tool_pattern: Option<String>,
+        tool_kind: Option<String>,
+        title_pattern: Option<String>,
         args_match: Option<BTreeMap<String, String>>,
+        raw_input_match: Option<BTreeMap<String, String>>,
     },
     OutputContains {
         id: String,
@@ -368,7 +374,10 @@ impl AssertionSpec {
             weight: 1.0,
             tool: Some(tool.to_string()),
             tool_pattern: None,
+            tool_kind: None,
+            title_pattern: None,
             args_match: json_object_to_regex_map(args_match),
+            raw_input_match: None,
             call_index: None,
             capture: None,
             capture_max_chars: None,
@@ -381,7 +390,10 @@ impl AssertionSpec {
             weight: 1.0,
             tool: Some(tool.to_string()),
             tool_pattern: None,
+            tool_kind: None,
+            title_pattern: None,
             args_match: None,
+            raw_input_match: None,
         }
     }
 
@@ -420,8 +432,11 @@ impl AssertionSpec {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SequenceStep {
-    pub tool: String,
+    pub tool: Option<String>,
+    pub tool_kind: Option<String>,
+    pub title_pattern: Option<String>,
     pub args_match: Option<BTreeMap<String, String>>,
+    pub raw_input_match: Option<BTreeMap<String, String>>,
     pub capture: Option<Vec<String>>,
 }
 
@@ -449,21 +464,46 @@ fn json_object_to_regex_map(value: Value) -> Option<BTreeMap<String, String>> {
 pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
     match spec {
         AssertionSpec::ToolCalled {
-            tool, tool_pattern, ..
-        } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
-            "tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+            tool,
+            tool_pattern,
+            tool_kind,
+            ..
+        } if primary_selector_count(tool, tool_pattern, tool_kind) != 1 => Err(anyhow!(
+            "tool_called assertion must declare exactly one of `tool`, `tool_pattern`, or `tool_kind`"
         )),
         AssertionSpec::ToolCallSequence { sequence, .. } if sequence.is_empty() => Err(anyhow!(
             "tool_call_sequence assertion must declare at least one step"
         )),
+        AssertionSpec::ToolCallSequence { sequence, .. }
+            if sequence.iter().any(|step| {
+                step.tool.is_some() == step.tool_kind.is_some()
+            }) =>
+        {
+            Err(anyhow!(
+                "tool_call_sequence steps must declare exactly one of `tool` or `tool_kind`"
+            ))
+        }
         AssertionSpec::NoToolCalled {
-            tool, tool_pattern, ..
-        } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
-            "no_tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+            tool,
+            tool_pattern,
+            tool_kind,
+            ..
+        } if primary_selector_count(tool, tool_pattern, tool_kind) != 1 => Err(anyhow!(
+            "no_tool_called assertion must declare exactly one of `tool`, `tool_pattern`, or `tool_kind`"
         )),
         AssertionSpec::FileRead { path, .. } if path.trim().is_empty() => Err(anyhow!(
             "file_read assertion must declare non-empty `path` regex"
         )),
         _ => Ok(()),
     }
+}
+
+fn primary_selector_count(
+    tool: &Option<String>,
+    tool_pattern: &Option<String>,
+    tool_kind: &Option<String>,
+) -> usize {
+    usize::from(tool.is_some())
+        + usize::from(tool_pattern.is_some())
+        + usize::from(tool_kind.is_some())
 }
