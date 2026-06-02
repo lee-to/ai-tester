@@ -90,8 +90,9 @@ pub fn create_sandbox(
     let temp = tempfile::Builder::new()
         .prefix(&format!("ai-tester-{}-", safe_name(scenario_name)))
         .tempdir()?;
-    let raw = temp.keep();
-    let base = fs::canonicalize(&raw)?;
+    #[allow(deprecated)]
+    let raw = temp.into_path();
+    let base = crate::util::path::canonicalize_existing(&raw)?;
     let mut skill_install_path = None;
 
     let result = (|| {

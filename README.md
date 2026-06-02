@@ -49,7 +49,9 @@ Once installed, upgrade in place with the built-in updater:
 ai-tester update
 ```
 
-Requires Rust **1.82 or newer** when building from source.
+Requires Rust **1.82 or newer** when building from source. The MSRV is fixed in
+`Cargo.toml` with `rust-version = "1.82"` and checked by a dedicated Rust 1.82
+CI job.
 
 ## Prerequisites
 
@@ -57,7 +59,7 @@ Per runtime you plan to use:
 
 - **Claude** (`runtime: claude`, default): `claude` CLI installed and logged in.
 - **Codex** (`runtime: codex`): `codex` CLI installed and logged in.
-- **ACP** (`runtime: acp`): a configured ACP agent command in `.ai-tester.yaml`.
+- **ACP** (`runtime: acp`): a built-in ACP profile or configured ACP agent command in `.ai-tester.yaml`.
 
 Check local readiness:
 

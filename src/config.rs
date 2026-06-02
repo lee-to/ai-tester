@@ -145,18 +145,13 @@ impl ResolvedAcpAgent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpServerTransport {
+    #[default]
     Stdio,
     Http,
     Sse,
-}
-
-impl Default for McpServerTransport {
-    fn default() -> Self {
-        Self::Stdio
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

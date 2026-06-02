@@ -446,6 +446,7 @@ fn evaluate_no_path_escape(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_tool_called(
     id: &str,
     weight: f64,

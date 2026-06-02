@@ -8,15 +8,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use agent_client_protocol::schema::{
-    CreateTerminalRequest, CreateTerminalResponse, KillTerminalRequest, KillTerminalResponse,
-    ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-    TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
-    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
-};
-use agent_client_protocol::Error;
 use serde_json::{Map, Value};
 
+use super::wire::{
+    CreateTerminalRequest, CreateTerminalResponse, Error, KillTerminalRequest,
+    KillTerminalResponse, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
+    ReleaseTerminalResponse, TerminalExitStatus, TerminalOutputRequest, TerminalOutputResponse,
+    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
+    WriteTextFileResponse,
+};
 use crate::trace::ToolCallRecord;
 use crate::util::path::{
     canonicalize_existing, path_is_within, resolve_existing_inside, resolve_write_target_inside,
@@ -321,15 +321,14 @@ impl TerminalManager {
         &self,
         command: String,
         args: Vec<String>,
-        env: Vec<agent_client_protocol::schema::EnvVariable>,
+        env: Vec<super::wire::EnvVariable>,
         cwd: PathBuf,
         output_byte_limit: Option<u64>,
     ) -> Result<String, Error> {
         let limit = output_byte_limit
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(DEFAULT_OUTPUT_LIMIT)
-            .min(MAX_OUTPUT_LIMIT)
-            .max(1);
+            .clamp(1, MAX_OUTPUT_LIMIT);
         let mut process = Command::new(&command);
         process
             .args(args)
@@ -604,10 +603,10 @@ fn acp_invalid_params(message: impl ToString) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use agent_client_protocol::schema::{
+    use super::super::wire::{
         KillTerminalRequest, TerminalOutputRequest, WaitForTerminalExitRequest,
     };
+    use super::*;
     use tempfile::TempDir;
 
     fn bridge(root: &Path, wait_timeout: Duration) -> AcpClientBridge {

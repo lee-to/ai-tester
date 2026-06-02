@@ -11,6 +11,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  msrv:
+    name: msrv (rust 1.82)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust 1.82
+        uses: dtolnay/rust-toolchain@1.82
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --locked
+
   test:
     name: rust (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

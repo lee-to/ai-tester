@@ -736,6 +736,7 @@ fn build_acp_config_request(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_acp_transcript_config(
     index: usize,
     opts: &RunOptions,
