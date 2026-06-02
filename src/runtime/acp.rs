@@ -1164,19 +1164,23 @@ impl ManagedAcpAgent {
         &self,
     ) -> Result<
         (
-            async_process::ChildStdin,
-            async_process::ChildStdout,
-            async_process::ChildStderr,
-            async_process::Child,
+            tokio::process::ChildStdin,
+            tokio::process::ChildStdout,
+            tokio::process::ChildStderr,
+            tokio::process::Child,
         ),
         AcpError,
     > {
         match &self.server {
             McpServer::Stdio(stdio) => {
-                let mut cmd = async_process::Command::new(&stdio.command);
+                let mut cmd = tokio::process::Command::new(&stdio.command);
                 cmd.args(&stdio.args);
                 for env_var in &stdio.env {
                     cmd.env(&env_var.name, &env_var.value);
+                }
+                #[cfg(unix)]
+                {
+                    cmd.process_group(0);
                 }
                 cmd.stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::piped())

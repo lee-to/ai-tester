@@ -1058,9 +1058,14 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
     let bin_dir = tmp.path().join("bin");
     fs::create_dir_all(&bin_dir).expect("bin dir");
     write_fake_acp_client_capabilities(&bin_dir);
+    let terminal_marker = tmp.path().join("terminal-descendant.marker");
+    let idle_warn = if cfg!(windows) { "5" } else { "1" };
     fs::write(
         tmp.path().join(".ai-tester.yaml"),
-        "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-capabilities\n    args: []\n",
+        format!(
+            "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-capabilities\n    args: []\n    env:\n      AI_TESTER_TERMINAL_MARKER: {}\n",
+            yaml_path(&terminal_marker)
+        ),
     )
     .expect("config written");
 
@@ -1082,7 +1087,7 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
             scenario.to_str().unwrap(),
             "--quiet",
             "--idle-warn",
-            "5",
+            idle_warn,
         ])
         .assert()
         .success()
@@ -1107,6 +1112,16 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
     assert!(trace_json.contains("\"_acpResolvedPath\""));
     assert!(trace_json.contains("\"_acpResolvedCwd\""));
     assert!(trace_json.contains("\"signal\": \"timeout\""));
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !terminal_marker.exists(),
+            "terminal process tree cleanup should prevent descendant marker {}",
+            terminal_marker.display()
+        );
+    }
 }
 
 #[test]
@@ -1445,13 +1460,15 @@ fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
     let bin_dir = tmp.path().join("bin");
     let log_dir = tmp.path().join("acp-logs");
     let pid_file = tmp.path().join("fake-acp-timeout.pid");
+    let descendant_marker = tmp.path().join("fake-acp-descendant.marker");
     fs::create_dir_all(&bin_dir).expect("bin dir");
     write_fake_acp_turn_timeout(&bin_dir);
     fs::write(
         tmp.path().join(".ai-tester.yaml"),
         format!(
-            "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-timeout\n    args: []\n    env:\n      AI_TESTER_ACP_PID_FILE: {}\n",
-            yaml_path(&pid_file)
+            "skills_dir: ./skills\nacp_agents:\n  local:\n    command: fake-acp-timeout\n    args: []\n    env:\n      AI_TESTER_ACP_PID_FILE: {}\n      AI_TESTER_ACP_DESCENDANT_MARKER: {}\n",
+            yaml_path(&pid_file),
+            yaml_path(&descendant_marker)
         ),
     )
     .expect("config written");
@@ -1550,6 +1567,16 @@ fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
         !process_is_alive(pid),
         "fake ACP process {pid} should be cleaned up"
     );
+
+    #[cfg(not(windows))]
+    {
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(
+            !descendant_marker.exists(),
+            "ACP process tree cleanup should prevent descendant marker {}",
+            descendant_marker.display()
+        );
+    }
 }
 
 #[test]
@@ -2433,64 +2460,148 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let path = bin_dir.join("fake-acp-env");
         fs::write(
             &path,
-            r#"#!/bin/sh
-if [ "$MY_FLAG" != "agent" ]; then
-  echo "expected ACP agent env 'agent', got '$MY_FLAG'" >&2
-  exit 3
-fi
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
 
-session_cwd=""
-response=""
+if os.environ.get("MY_FLAG") != "agent":
+    print(
+        f"expected ACP agent env 'agent', got {os.environ.get('MY_FLAG')!r}",
+        file=sys.stderr,
+        flush=True,
+    )
+    sys.exit(3)
 
-send_request() {
-  printf '%s\n' "$1"
-  IFS= read -r response
-}
 
-assert_output() {
-  actual="$1"
-  expected="$2"
-  label="$3"
-  if [ "$actual" != "$expected" ]; then
-    echo "$label expected '$expected', got '$actual'" >&2
-    exit 4
-  fi
-}
+def write_json(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
 
-while IFS= read -r line || [ -n "$line" ]; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*|*'"method": "initialize"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-env\",\"version\":\"1.0.0\"}}}"
-      ;;
-    *'"method":"session/new"'*|*'"method": "session/new"'*)
-      session_cwd=$(printf '%s' "$line" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
-      ;;
-    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-default\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"printf %s \\$MY_FLAG\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
-      terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-default\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-default\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-      output=$(printf '%s' "$response" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
-      assert_output "$output" "fixture" "default terminal env"
 
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-override\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"printf %s \\$MY_FLAG\"],\"env\":[{\"name\":\"MY_FLAG\",\"value\":\"terminal\"}],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
-      terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-override\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-      send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-override\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-      output=$(printf '%s' "$response" | sed -n 's/.*"output":"\([^"]*\)".*/\1/p')
-      assert_output "$output" "terminal" "override terminal env"
+def send_request(request_id, method, params):
+    write_json(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+    )
+    response_line = sys.stdin.readline()
+    if not response_line:
+        print("missing response from ai-tester", file=sys.stderr, flush=True)
+        sys.exit(5)
+    return json.loads(response_line)
 
-      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
-      ;;
-    *'"method":"session/close"'*|*'"method": "session/close"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
-      exit 0
-      ;;
-  esac
-done
+
+def assert_output(actual, expected, label):
+    text = str(actual).strip()
+    if text != expected:
+        print(f"{label} expected {expected!r}, got {text!r}", file=sys.stderr, flush=True)
+        sys.exit(4)
+
+
+session_cwd = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": [],
+                    "agentInfo": {"name": "fake-acp-env", "version": "1.0.0"},
+                },
+            }
+        )
+    elif method == "session/new":
+        session_cwd = message["params"]["cwd"]
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {"sessionId": "s1", "configOptions": []},
+            }
+        )
+    elif method == "session/prompt":
+        created = send_request(
+            "term-create-default",
+            "terminal/create",
+            {
+                "sessionId": "s1",
+                "command": "sh",
+                "args": ["-c", 'printf %s "$MY_FLAG"'],
+                "cwd": session_cwd,
+                "outputByteLimit": 1024,
+            },
+        )
+        terminal_id = created["result"]["terminalId"]
+        send_request(
+            "term-wait-default",
+            "terminal/wait_for_exit",
+            {"sessionId": "s1", "terminalId": terminal_id},
+        )
+        output = send_request(
+            "term-output-default",
+            "terminal/output",
+            {"sessionId": "s1", "terminalId": terminal_id},
+        )
+        assert_output(output["result"]["output"], "fixture", "default terminal env")
+
+        created = send_request(
+            "term-create-override",
+            "terminal/create",
+            {
+                "sessionId": "s1",
+                "command": "sh",
+                "args": ["-c", 'printf %s "$MY_FLAG"'],
+                "env": [{"name": "MY_FLAG", "value": "terminal"}],
+                "cwd": session_cwd,
+                "outputByteLimit": 1024,
+            },
+        )
+        terminal_id = created["result"]["terminalId"]
+        send_request(
+            "term-wait-override",
+            "terminal/wait_for_exit",
+            {"sessionId": "s1", "terminalId": terminal_id},
+        )
+        output = send_request(
+            "term-output-override",
+            "terminal/output",
+            {"sessionId": "s1", "terminalId": terminal_id},
+        )
+        assert_output(output["result"]["output"], "terminal", "override terminal env")
+
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "done"},
+                    },
+                },
+            }
+        )
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {"stopReason": "end_turn"},
+            }
+        )
+    elif method == "session/close":
+        write_json({"jsonrpc": "2.0", "id": message.get("id"), "result": {}})
+        sys.exit(0)
 "#,
         )
         .expect("fake acp env written");
@@ -2742,50 +2853,149 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let path = bin_dir.join("fake-acp-capabilities");
         fs::write(
             &path,
-            r#"#!/bin/sh
-caps_ok=0
-session_cwd=""
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
 
-send_request() {
-  printf '%s\n' "$1"
-  IFS= read -r response
-}
 
-while IFS= read -r line || [ -n "$line" ]; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*|*'"method": "initialize"'*)
-      case "$line" in
-        *'"readTextFile":true*'"writeTextFile":true*'"terminal":true*) caps_ok=1 ;;
-        *) caps_ok=0 ;;
-      esac
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-capabilities\",\"version\":\"1.0.0\"}}}"
-      ;;
-    *'"method":"session/new"'*|*'"method": "session/new"'*)
-      session_cwd=$(printf '%s' "$line" | sed -n 's/.*"cwd":"\([^"]*\)".*/\1/p')
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
-      ;;
-    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
-      if [ "$caps_ok" = "1" ]; then
-        input_path="$session_cwd/notes/input.txt"
-        output_path="$session_cwd/notes/output.txt"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-read-1\",\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$input_path\",\"line\":1,\"limit\":1}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-write-1\",\"method\":\"fs/write_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$output_path\",\"content\":\"written from acp\n\"}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 30\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
-        terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-1\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-1\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-kill-1\",\"method\":\"terminal/kill\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
-      fi
-      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
-      ;;
-    *'"method":"session/close"'*|*'"method": "session/close"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
-      exit 0
-      ;;
-  esac
-done
+def write_json(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def send_request(request_id, method, params):
+    write_json(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+    )
+    response_line = sys.stdin.readline()
+    if not response_line:
+        print("missing response from ai-tester", file=sys.stderr, flush=True)
+        sys.exit(5)
+    return json.loads(response_line)
+
+
+caps_ok = False
+session_cwd = None
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        caps = message.get("params", {}).get("clientCapabilities", {})
+        fs_caps = caps.get("fs", {})
+        caps_ok = bool(
+            fs_caps.get("readTextFile")
+            and fs_caps.get("writeTextFile")
+            and caps.get("terminal")
+        )
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {},
+                    "authMethods": [],
+                    "agentInfo": {
+                        "name": "fake-acp-capabilities",
+                        "version": "1.0.0",
+                    },
+                },
+            }
+        )
+    elif method == "session/new":
+        session_cwd = message["params"]["cwd"]
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {"sessionId": "s1", "configOptions": []},
+            }
+        )
+    elif method == "session/prompt":
+        if caps_ok:
+            input_path = os.path.join(session_cwd, "notes", "input.txt")
+            output_path = os.path.join(session_cwd, "notes", "output.txt")
+            read = send_request(
+                "fs-read-1",
+                "fs/read_text_file",
+                {"sessionId": "s1", "path": input_path, "line": 1, "limit": 1},
+            )
+            content = read.get("result", {}).get("content", "written from acp\n")
+            send_request(
+                "fs-write-1",
+                "fs/write_text_file",
+                {"sessionId": "s1", "path": output_path, "content": content},
+            )
+
+            marker = os.environ.get("AI_TESTER_TERMINAL_MARKER")
+            terminal_env = []
+            if marker:
+                terminal_args = [
+                    "-c",
+                    '(sleep 3; printf leaked > "$AI_TESTER_TERMINAL_MARKER") & sleep 30',
+                ]
+                terminal_env.append(
+                    {"name": "AI_TESTER_TERMINAL_MARKER", "value": marker}
+                )
+            else:
+                terminal_args = ["-c", "sleep 30"]
+
+            params = {
+                "sessionId": "s1",
+                "command": "sh",
+                "args": terminal_args,
+                "cwd": session_cwd,
+                "outputByteLimit": 1024,
+            }
+            if terminal_env:
+                params["env"] = terminal_env
+            created = send_request("term-create-1", "terminal/create", params)
+            terminal_id = created["result"]["terminalId"]
+            send_request(
+                "term-output-1",
+                "terminal/output",
+                {"sessionId": "s1", "terminalId": terminal_id},
+            )
+            send_request(
+                "term-wait-1",
+                "terminal/wait_for_exit",
+                {"sessionId": "s1", "terminalId": terminal_id},
+            )
+            send_request(
+                "term-kill-1",
+                "terminal/kill",
+                {"sessionId": "s1", "terminalId": terminal_id},
+            )
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "done"},
+                    },
+                },
+            }
+        )
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "result": {"stopReason": "end_turn"},
+            }
+        )
+    elif method == "session/close":
+        write_json({"jsonrpc": "2.0", "id": message.get("id"), "result": {}})
+        sys.exit(0)
 "#,
         )
         .expect("fake acp capabilities written");
@@ -2914,57 +3124,134 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let path = bin_dir.join("fake-acp-mcp");
         fs::write(
             &path,
-            r#"#!/bin/sh
-fail_request() {
-  id="$1"
-  message="$2"
-  echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32000,\"message\":\"$message\"}}"
-  exit 0
-}
+            r#"#!/usr/bin/env python3
+import json
+import os
+import sys
 
-while IFS= read -r line || [ -n "$line" ]; do
-  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')
-  case "$line" in
-    *'"method":"initialize"'*|*'"method": "initialize"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"mcpCapabilities\":{\"http\":true,\"sse\":true}},\"authMethods\":[],\"agentInfo\":{\"name\":\"fake-acp-mcp\",\"version\":\"1.0.0\"}}}"
-      ;;
-    *'"method":"session/new"'*|*'"method": "session/new"'*)
-      case "$line" in
-        *'"name":"codegraph"'*'"command":"scenario-codegraph"'*'"name":"API_TOKEN","value":"scenario-secret"'*) ;;
-        *) fail_request "$id" "missing scenario codegraph MCP server" ;;
-      esac
-      case "$line" in
-        *'"name":"scenario_only"'*'"command":"scenario-only"'*) ;;
-        *) fail_request "$id" "missing scenario-only MCP server" ;;
-      esac
-      if [ "$EXPECTED_MCP_PROFILE" = "mock" ]; then
-        case "$line" in
-          *'"name":"docs"'*|*'"name":"events"'*) fail_request "$id" "mock profile should exclude docs/events" ;;
-        esac
-      elif [ "$EXPECTED_MCP_PROFILE" = "full" ]; then
-        case "$line" in
-          *'"type":"http"'*'"name":"docs"'*'"url":"http://127.0.0.1:3001/profile"'*'"name":"Authorization","value":"Bearer profile-secret"'*) ;;
-          *) fail_request "$id" "full profile should include profile-overridden docs" ;;
-        esac
-        case "$line" in
-          *'"type":"sse"'*'"name":"events"'*'"url":"http://127.0.0.1:3002/events"'*) ;;
-          *) fail_request "$id" "full profile should include events" ;;
-        esac
-      else
-        fail_request "$id" "EXPECTED_MCP_PROFILE is not set"
-      fi
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s1\",\"configOptions\":[]}}"
-      ;;
-    *'"method":"session/prompt"'*|*'"method": "session/prompt"'*)
-      echo '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"}}}}'
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
-      ;;
-    *'"method":"session/close"'*|*'"method": "session/close"'*)
-      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
-      exit 0
-      ;;
-  esac
-done
+
+def write_json(value):
+    print(json.dumps(value, separators=(",", ":")), flush=True)
+
+
+def fail_request(request_id, message):
+    write_json(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32000, "message": message},
+        }
+    )
+    sys.exit(0)
+
+
+def find_server(servers, name):
+    return next((server for server in servers if server.get("name") == name), None)
+
+
+def has_name_value(items, name, value):
+    return any(item.get("name") == name and item.get("value") == value for item in items or [])
+
+
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    message = json.loads(line)
+    request_id = message.get("id")
+    method = message.get("method")
+    if method == "initialize":
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {
+                    "protocolVersion": 1,
+                    "agentCapabilities": {
+                        "mcpCapabilities": {"http": True, "sse": True}
+                    },
+                    "authMethods": [],
+                    "agentInfo": {"name": "fake-acp-mcp", "version": "1.0.0"},
+                },
+            }
+        )
+    elif method == "session/new":
+        servers = message.get("params", {}).get("mcpServers", [])
+        expected = os.environ.get("EXPECTED_MCP_PROFILE")
+        codegraph = find_server(servers, "codegraph")
+        scenario_only = find_server(servers, "scenario_only")
+        if (
+            not codegraph
+            or codegraph.get("command") != "scenario-codegraph"
+            or not has_name_value(codegraph.get("env"), "API_TOKEN", "scenario-secret")
+        ):
+            fail_request(request_id, "missing scenario codegraph MCP server")
+        if not scenario_only or scenario_only.get("command") != "scenario-only":
+            fail_request(request_id, "missing scenario-only MCP server")
+
+        if expected == "mock":
+            if (
+                len(servers) != 2
+                or find_server(servers, "docs") is not None
+                or find_server(servers, "events") is not None
+            ):
+                fail_request(
+                    request_id, "mock profile should only include codegraph and scenario_only"
+                )
+        elif expected == "full":
+            docs = find_server(servers, "docs")
+            events = find_server(servers, "events")
+            if (
+                len(servers) != 4
+                or not docs
+                or docs.get("type") != "http"
+                or docs.get("url") != "http://127.0.0.1:3001/profile"
+                or not has_name_value(
+                    docs.get("headers"), "Authorization", "Bearer profile-secret"
+                )
+            ):
+                fail_request(
+                    request_id, "full profile should include profile-overridden docs"
+                )
+            if (
+                not events
+                or events.get("type") != "sse"
+                or events.get("url") != "http://127.0.0.1:3002/events"
+            ):
+                fail_request(request_id, "full profile should include events")
+        else:
+            fail_request(request_id, "EXPECTED_MCP_PROFILE is not set")
+
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"sessionId": "s1", "configOptions": []},
+            }
+        )
+    elif method == "session/prompt":
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "sessionId": "s1",
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "done"},
+                    },
+                },
+            }
+        )
+        write_json(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": {"stopReason": "end_turn"},
+            }
+        )
+    elif method == "session/close":
+        write_json({"jsonrpc": "2.0", "id": request_id, "result": {}})
+        sys.exit(0)
 "#,
         )
         .expect("fake acp mcp written");
@@ -3365,6 +3652,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             r#"#!/bin/sh
 if [ -n "$AI_TESTER_ACP_PID_FILE" ]; then
   printf '%s\n' "$$" > "$AI_TESTER_ACP_PID_FILE"
+fi
+if [ -n "$AI_TESTER_ACP_DESCENDANT_MARKER" ]; then
+  parent=$$
+  (
+    while kill -0 "$parent" 2>/dev/null; do
+      sleep 1
+    done
+    sleep 1
+    printf leaked > "$AI_TESTER_ACP_DESCENDANT_MARKER"
+  ) &
 fi
 while IFS= read -r line || [ -n "$line" ]; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([^,}]*\).*/\1/p')

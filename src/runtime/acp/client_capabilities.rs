@@ -330,6 +330,11 @@ impl TerminalManager {
             .unwrap_or(DEFAULT_OUTPUT_LIMIT)
             .clamp(1, MAX_OUTPUT_LIMIT);
         let mut process = Command::new(&command);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
         process
             .args(args)
             .current_dir(cwd)
@@ -407,7 +412,7 @@ impl TerminalManager {
             if Instant::now() >= deadline {
                 let timeout_status = TerminalExitStatus::new().signal(Some("timeout".to_string()));
                 set_status_once(&entry.status, timeout_status.clone())?;
-                let _ = kill_pid(entry.pid);
+                let _ = kill_process_tree(entry.pid);
                 return Ok(WaitForTerminalExitResponse::new(timeout_status));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -416,7 +421,7 @@ impl TerminalManager {
 
     fn kill(&self, terminal_id: &str) -> Result<KillTerminalResponse, Error> {
         let entry = self.entry(terminal_id)?;
-        let _ = kill_pid(entry.pid);
+        let _ = kill_process_tree(entry.pid);
         if entry
             .status
             .lock()
@@ -444,7 +449,7 @@ impl TerminalManager {
             .map_err(|_| acp_invalid_params("terminal status lock poisoned"))?
             .is_none()
         {
-            let _ = kill_pid(entry.pid);
+            let _ = kill_process_tree(entry.pid);
             set_status_once(
                 &entry.status,
                 TerminalExitStatus::new().signal(Some("released".to_string())),
@@ -541,7 +546,7 @@ fn exit_status_to_terminal(status: std::process::ExitStatus) -> TerminalExitStat
     out
 }
 
-fn kill_pid(pid: u32) -> std::io::Result<()> {
+fn kill_process_tree(pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         Command::new("taskkill")
@@ -553,8 +558,15 @@ fn kill_pid(pid: u32) -> std::io::Result<()> {
     }
     #[cfg(not(windows))]
     {
+        let process_group = format!("-{pid}");
         Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
+            .args(["-TERM", "--", &process_group])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        thread::sleep(Duration::from_millis(100));
+        Command::new("kill")
+            .args(["-KILL", "--", &process_group])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()

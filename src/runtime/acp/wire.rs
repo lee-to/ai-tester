@@ -3,12 +3,11 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use async_process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use futures::future::BoxFuture;
-use futures::io::BufReader;
-use futures::{AsyncBufReadExt, AsyncWriteExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 #[derive(Debug, Clone, Copy)]
@@ -1325,7 +1324,7 @@ impl PendingResponse {
 
 struct ManagedChildGuard {
     child: Child,
-    pid: u32,
+    pid: Option<u32>,
     killed: bool,
 }
 
@@ -1341,8 +1340,10 @@ impl ManagedChildGuard {
 
     fn kill_if_running(&mut self) {
         if !self.killed {
-            kill_process_tree(self.pid);
-            let _ = self.child.kill();
+            if let Some(pid) = self.pid {
+                kill_process_tree(pid);
+            }
+            let _ = self.child.start_kill();
             self.killed = true;
         }
     }
@@ -1364,9 +1365,10 @@ async fn stdout_loop(
     debug_callback: Option<DebugCallback>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
-    while let Some(line_result) = lines.next().await {
-        let line = match line_result {
-            Ok(line) => line,
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
             Err(err) => {
                 let _ = errors.send(Error::internal(format!("read ACP stdout failed: {err}")));
                 return;
@@ -1419,7 +1421,7 @@ async fn stdout_loop(
 
 async fn stderr_loop(stderr: ChildStderr, debug_callback: Option<DebugCallback>) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Some(Ok(line)) = lines.next().await {
+    while let Ok(Some(line)) = lines.next_line().await {
         if let Some(callback) = &debug_callback {
             callback(&line, LineDirection::Stderr);
         }
@@ -1504,11 +1506,15 @@ fn kill_process_tree(pid: u32) {
     {
         let group = format!("-{pid}");
         let _ = std::process::Command::new("kill")
-            .args(["-TERM", &group])
+            .args(["-TERM", "--", &group])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = std::process::Command::new("kill")
-            .args(["-KILL", &group])
+            .args(["-KILL", "--", &group])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status();
     }
 }

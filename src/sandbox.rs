@@ -396,12 +396,12 @@ fn kill_process_tree(child: &mut Child) {
     {
         let process_group = format!("-{pid}");
         let _ = Command::new("kill")
-            .args(["-TERM", &process_group])
+            .args(["-TERM", "--", &process_group])
             .output();
         thread::sleep(Duration::from_millis(200));
         if child.try_wait().ok().flatten().is_none() {
             let _ = Command::new("kill")
-                .args(["-KILL", &process_group])
+                .args(["-KILL", "--", &process_group])
                 .output();
             let _ = child.kill();
         }

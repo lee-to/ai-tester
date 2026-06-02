@@ -12,9 +12,9 @@ use ai_tester::scenario::{load_scenario_file, AssertionSpec, Fixtures, Scenario,
 use ai_tester::skill::allowed_tools::tokenize_allowed_tools;
 use ai_tester::skill::parse_skill_md;
 use ai_tester::trace::{ToolCallRecord, TraceRecord, Turn};
-use ai_tester::util::path::{
-    resolve_existing_inside, resolve_write_target_inside, strip_windows_verbatim_prefix,
-};
+#[cfg(windows)]
+use ai_tester::util::path::strip_windows_verbatim_prefix;
+use ai_tester::util::path::{resolve_existing_inside, resolve_write_target_inside};
 use ai_tester::util::redaction::Redactor;
 use ai_tester::util::regex::compile_pattern;
 use std::collections::BTreeMap;
