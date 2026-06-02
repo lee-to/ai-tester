@@ -99,7 +99,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     let bridge_for_terminal_release = Arc::clone(&client_bridge);
     let bridge_for_connection = Arc::clone(&client_bridge);
 
-    let _cwd_guard = CurrentDirGuard::push(&process_cwd)?;
+    let _cwd_guard = CurrentDirGuard::push(&session_cwd)?;
     let mut result = Client
         .builder()
         .name("ai-tester")

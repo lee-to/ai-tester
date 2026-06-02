@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -49,9 +49,29 @@ impl Sandbox {
         if self.keep || !self.path.exists() {
             return Ok(());
         }
-        fs::remove_dir_all(&self.path)
+        remove_dir_all_retry(&self.path)
             .with_context(|| format!("remove sandbox {}", self.path.display()))
     }
+}
+
+fn remove_dir_all_retry(path: &Path) -> io::Result<()> {
+    const ATTEMPTS: usize = 30;
+    const DELAY: Duration = Duration::from_millis(100);
+
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        match fs::remove_dir_all(path) {
+            Ok(()) => return Ok(()),
+            Err(_) if !path.exists() => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt + 1 < ATTEMPTS {
+                    thread::sleep(DELAY);
+                }
+            }
+        }
+    }
+    Err(last_error.expect("at least one removal attempt ran"))
 }
 
 impl Drop for Sandbox {

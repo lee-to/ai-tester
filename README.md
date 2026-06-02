@@ -381,6 +381,9 @@ Order of operations:
 8. Write `files_unstaged`.
 9. Run `setup_commands`.
 
+`git_branch` and `files_staged` require `git_init: true`; scenarios that set
+those fields without git initialization are rejected during dry-run validation.
+
 `setup_commands` run through `cmd /C` on Windows and `/bin/sh -c` on Unix.
 Each setup command has its own timeout. The default is 60 seconds; configure it
 with `defaults.setup_timeout_seconds`, override it per scenario with
@@ -398,6 +401,10 @@ subprocesses for Claude, Codex, and ACP. Precedence is predictable:
 - MCP server env/header config is forwarded through ACP session config and is not merged with `fixtures.env`.
 
 ## Assertions
+
+Assertion `id` values must be non-empty and unique within a scenario. Assertion
+`weight` values must be finite and positive, and `turn_count_at_most.max` must
+be positive. Invalid assertion specs are rejected during dry-run validation.
 
 ### `tool_called`
 

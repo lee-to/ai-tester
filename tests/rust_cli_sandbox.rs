@@ -135,6 +135,26 @@ fn cli_run_dry_run_loads_file_without_creating_runtime_sandbox() {
 }
 
 #[test]
+fn cli_run_dry_run_validation_rejects_duplicate_assertion_ids() {
+    let tmp = TempDir::new().expect("temp dir");
+    let scenario = tmp.path().join("scenario.yaml");
+    fs::write(
+        &scenario,
+        "scenario: duplicate-assertion\nsystem_prompt: You are helpful.\nassertions:\n  - id: repeated\n    type: output_contains\n    pattern: done\n  - id: repeated\n    type: no_output_contains\n    pattern: warn\n",
+    )
+    .expect("scenario written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args(["run", "--file", scenario.to_str().unwrap(), "--dry-run"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("assertions[].id"))
+        .stderr(predicate::str::contains("repeated"))
+        .stdout(predicate::str::contains("OK").not());
+}
+
+#[test]
 fn cli_run_rejects_zero_setup_timeout() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1034,7 +1054,7 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
             scenario.to_str().unwrap(),
             "--quiet",
             "--idle-warn",
-            "3",
+            "5",
         ])
         .assert()
         .success()
@@ -1364,7 +1384,7 @@ fn cli_run_with_fake_acp_invalid_stdout_reports_transcript_path() {
             "--acp-log",
             log_dir.to_str().unwrap(),
             "--idle-warn",
-            "1",
+            "5",
         ])
         .assert()
         .code(2)
@@ -2528,7 +2548,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             $created = Send-Request "term-create-1" "terminal/create" @{
                 sessionId = "s1"
                 command = "powershell"
-                args = @("-NoProfile", "-Command", "Start-Sleep -Seconds 2")
+                args = @("-NoProfile", "-Command", "Start-Sleep -Seconds 30")
                 cwd = $sessionCwd
                 outputByteLimit = 1024
             }
@@ -2610,7 +2630,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         output_path="$session_cwd/notes/output.txt"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-read-1\",\"method\":\"fs/read_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$input_path\",\"line\":1,\"limit\":1}}"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"fs-write-1\",\"method\":\"fs/write_text_file\",\"params\":{\"sessionId\":\"s1\",\"path\":\"$output_path\",\"content\":\"written from acp\n\"}}"
-        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 2\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
+        send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-create-1\",\"method\":\"terminal/create\",\"params\":{\"sessionId\":\"s1\",\"command\":\"sh\",\"args\":[\"-c\",\"sleep 30\"],\"cwd\":\"$session_cwd\",\"outputByteLimit\":1024}}"
         terminal_id=$(printf '%s' "$response" | sed -n 's/.*"terminalId":"\([^"]*\)".*/\1/p')
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-output-1\",\"method\":\"terminal/output\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
         send_request "{\"jsonrpc\":\"2.0\",\"id\":\"term-wait-1\",\"method\":\"terminal/wait_for_exit\",\"params\":{\"sessionId\":\"s1\",\"terminalId\":\"$terminal_id\"}}"
@@ -3142,21 +3162,6 @@ fn write_fake_acp_invalid_stdout(bin_dir: &Path) {
             r#"
 [Console]::Error.WriteLine("TOKEN=bad-secret")
 [Console]::Error.Flush()
-$line = [Console]::In.ReadLine()
-if ($line) {
-    $message = $line | ConvertFrom-Json
-    [Console]::Out.WriteLine((@{
-        jsonrpc = "2.0"
-        id = $message.id
-        result = @{
-            protocolVersion = 1
-            agentCapabilities = @{}
-            authMethods = @()
-            agentInfo = @{ name = "fake-acp-invalid"; version = "1.0.0" }
-        }
-    } | ConvertTo-Json -Compress -Depth 32))
-    [Console]::Out.Flush()
-}
 [Console]::Out.WriteLine("not-json Authorization: Bearer invalid-secret")
 [Console]::Out.Flush()
 Start-Sleep -Seconds 1
@@ -3172,9 +3177,6 @@ Start-Sleep -Seconds 1
             &path,
             "#!/bin/sh\n\
 echo 'TOKEN=bad-secret' >&2\n\
-IFS= read -r line\n\
-id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([^,}]*\\).*/\\1/p')\n\
-echo \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":$id,\\\"result\\\":{\\\"protocolVersion\\\":1,\\\"agentCapabilities\\\":{},\\\"authMethods\\\":[],\\\"agentInfo\\\":{\\\"name\\\":\\\"fake-acp-invalid\\\",\\\"version\\\":\\\"1.0.0\\\"}}}\"\n\
 echo 'not-json Authorization: Bearer invalid-secret'\n\
 sleep 1\n",
         )

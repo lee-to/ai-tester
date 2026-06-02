@@ -238,6 +238,68 @@ fn fixtures_setup_timeout_seconds_parses() {
     assert_eq!(scenario.fixtures.setup_timeout_seconds, Some(7));
 }
 
+#[test]
+fn scenario_validation_rejects_invalid_assertion_ids_weights_and_limits() {
+    let cases = [
+        (
+            "scenario: duplicate-id\nsystem_prompt: Body\nassertions:\n  - id: same\n    type: output_contains\n    pattern: done\n  - id: same\n    type: no_output_contains\n    pattern: warn\n",
+            &["assertions[].id", "same"][..],
+        ),
+        (
+            "scenario: empty-id\nsystem_prompt: Body\nassertions:\n  - id: '   '\n    type: output_contains\n    pattern: done\n",
+            &["assertions[0].id", "must not be empty"][..],
+        ),
+        (
+            "scenario: zero-weight\nsystem_prompt: Body\nassertions:\n  - id: zero\n    type: output_contains\n    weight: 0\n    pattern: done\n",
+            &["assertions[0].weight", "positive"][..],
+        ),
+        (
+            "scenario: negative-weight\nsystem_prompt: Body\nassertions:\n  - id: negative\n    type: output_contains\n    weight: -1\n    pattern: done\n",
+            &["assertions[0].weight", "positive"][..],
+        ),
+        (
+            "scenario: nan-weight\nsystem_prompt: Body\nassertions:\n  - id: nan\n    type: output_contains\n    weight: .nan\n    pattern: done\n",
+            &["assertions[0].weight", "finite"][..],
+        ),
+        (
+            "scenario: infinite-weight\nsystem_prompt: Body\nassertions:\n  - id: infinite\n    type: output_contains\n    weight: .inf\n    pattern: done\n",
+            &["assertions[0].weight", "finite"][..],
+        ),
+        (
+            "scenario: zero-turn-count\nsystem_prompt: Body\nassertions:\n  - id: turns\n    type: turn_count_at_most\n    max: 0\n",
+            &["assertions[0].max", "positive"][..],
+        ),
+    ];
+
+    for (yaml, expected_parts) in cases {
+        let err = Scenario::from_yaml_str(yaml).expect_err("scenario validation rejects case");
+        let message = err.to_string();
+        for expected in expected_parts {
+            assert!(
+                message.contains(expected),
+                "expected {message:?} to contain {expected:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scenario_validation_rejects_git_fixture_options_without_git_init() {
+    let branch_err = Scenario::from_yaml_str(
+        "scenario: branch-without-git\nsystem_prompt: Body\nfixtures:\n  git_branch: feature/demo\n",
+    )
+    .expect_err("git_branch rejected without git_init");
+    assert!(branch_err.to_string().contains("fixtures.git_branch"));
+    assert!(branch_err.to_string().contains("fixtures.git_init"));
+
+    let staged_err = Scenario::from_yaml_str(
+        "scenario: staged-without-git\nsystem_prompt: Body\nfixtures:\n  files_staged:\n    - path: staged.txt\n      content: staged\n",
+    )
+    .expect_err("files_staged rejected without git_init");
+    assert!(staged_err.to_string().contains("fixtures.files_staged"));
+    assert!(staged_err.to_string().contains("fixtures.git_init"));
+}
+
 #[cfg(windows)]
 #[test]
 fn path_helper_strips_windows_verbatim_prefix() {

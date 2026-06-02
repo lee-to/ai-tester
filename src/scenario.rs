@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -71,6 +71,14 @@ impl Scenario {
         if self.fixtures.setup_timeout_seconds == Some(0) {
             bail!("fixtures.setup_timeout_seconds must be positive");
         }
+        if !self.fixtures.git_init {
+            if self.fixtures.git_branch.is_some() {
+                bail!("fixtures.git_branch requires fixtures.git_init: true");
+            }
+            if !self.fixtures.files_staged.is_empty() {
+                bail!("fixtures.files_staged requires fixtures.git_init: true");
+            }
+        }
         for file in self
             .fixtures
             .files_committed
@@ -80,8 +88,20 @@ impl Scenario {
         {
             file.validate()?;
         }
-        for assertion in &self.assertions {
-            validate_assertion_shape(assertion)?;
+        let mut assertion_ids = BTreeSet::new();
+        for (index, assertion) in self.assertions.iter().enumerate() {
+            let id = assertion.id();
+            if id.trim().is_empty() {
+                bail!("assertions[{index}].id must not be empty");
+            }
+            if !assertion_ids.insert(id) {
+                bail!("assertions[].id must be unique: '{id}'");
+            }
+            let weight = assertion.weight();
+            if !weight.is_finite() || weight <= 0.0 {
+                bail!("assertions[{index}].weight must be finite and positive");
+            }
+            validate_assertion_shape(index, assertion)?;
         }
         Ok(())
     }
@@ -461,7 +481,7 @@ fn json_object_to_regex_map(value: Value) -> Option<BTreeMap<String, String>> {
     )
 }
 
-pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
+pub fn validate_assertion_shape(index: usize, spec: &AssertionSpec) -> anyhow::Result<()> {
     match spec {
         AssertionSpec::ToolCalled {
             tool,
@@ -494,6 +514,9 @@ pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
         AssertionSpec::FileRead { path, .. } if path.trim().is_empty() => Err(anyhow!(
             "file_read assertion must declare non-empty `path` regex"
         )),
+        AssertionSpec::TurnCountAtMost { max, .. } if *max == 0 => {
+            Err(anyhow!("assertions[{index}].max must be positive"))
+        }
         _ => Ok(()),
     }
 }

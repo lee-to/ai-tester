@@ -76,7 +76,7 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
             }
         }
         Err(err) => {
-            println!(
+            eprintln!(
                 "{} scenario discovery failed: {err}",
                 ui::paint("x", Tone::Error)
             );
@@ -90,12 +90,12 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
     println!("  {}", ui::kv("invalid", invalid));
     println!();
     if invalid > 0 {
-        println!(
+        eprintln!(
             "{} {}",
             ui::status("FAIL", false),
             ui::paint("some scenarios failed to load", Tone::Muted)
         );
-        Ok(1)
+        Ok(2)
     } else {
         println!(
             "{} {}",
