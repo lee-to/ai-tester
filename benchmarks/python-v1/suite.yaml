@@ -1,5 +1,6 @@
 suite: python-v1
 version: 1
+category: coding
 description: Python stdlib benchmark for config-driven maintenance tasks.
 requirements:
   commands:

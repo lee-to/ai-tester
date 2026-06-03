@@ -33,6 +33,8 @@ struct BenchmarkSuite {
     #[serde(default)]
     version: Option<u32>,
     #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     requirements: BenchmarkRequirements,
@@ -79,6 +81,7 @@ struct BenchmarkScenario {
 struct BenchmarkReport {
     suite: String,
     version: Option<u32>,
+    category: Option<String>,
     description: Option<String>,
     score: f64,
     correctness: f64,
@@ -123,6 +126,7 @@ pub fn benchmark_command(opts: BenchmarkOptions) -> anyhow::Result<i32> {
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
                     "suite": suite.suite,
+                    "category": suite.category,
                     "skipped": true,
                     "missingRequirements": missing,
                 }))?
@@ -161,6 +165,13 @@ fn load_suite(path: &Path) -> anyhow::Result<BenchmarkSuite> {
 fn validate_suite(suite: &BenchmarkSuite) -> anyhow::Result<()> {
     if suite.suite.trim().is_empty() {
         anyhow::bail!("benchmark suite name must not be empty");
+    }
+    if suite
+        .category
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        anyhow::bail!("benchmark suite category must not be empty when provided");
     }
     if suite.scenarios.is_empty() {
         anyhow::bail!("benchmark suite must include at least one scenario");
@@ -256,6 +267,7 @@ fn run_suite(
     Ok(BenchmarkReport {
         suite: suite.suite.clone(),
         version: suite.version,
+        category: suite.category.clone(),
         description: suite.description.clone(),
         score,
         correctness,
@@ -472,6 +484,9 @@ fn resolve_suite_path(path: &Path) -> anyhow::Result<PathBuf> {
 fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
     println!("{}", ui::header("ai-tester", "benchmark"));
     println!("  {}", ui::kv("suite", &report.suite));
+    if let Some(category) = &report.category {
+        println!("  {}", ui::kv("category", category));
+    }
     if let Some(runtime) = &opts.runtime {
         println!("  {}", ui::kv("runtime", runtime));
     }
@@ -508,6 +523,9 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
 fn render_markdown(report: &BenchmarkReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("# ai-tester benchmark: {}\n\n", report.suite));
+    if let Some(category) = &report.category {
+        out.push_str(&format!("**Category:** {category}\n\n"));
+    }
     out.push_str(&format!(
         "**Score:** {:.1}/100 · **Correctness:** {:.1} · **Efficiency:** {:.1}\n\n",
         report.score, report.correctness, report.efficiency

@@ -236,6 +236,7 @@ Suite manifests are YAML:
 ```yaml
 suite: js-v1
 version: 1
+category: coding
 requirements:
   commands:
     - node --version
@@ -253,7 +254,9 @@ scenarios:
 The repository includes optional `js-v1` and `python-v1` packs under
 `benchmarks/`. They use only `node` or `python3` plus standard libraries, so the
 benchmark does not depend on network package installation. If a required command
-is missing, the suite is reported as skipped.
+is missing, the suite is reported as skipped. Set `category` to label shared
+suites, for example `coding`, `frontend`, `art`, or `reasoning`; the category is
+included in live, JSON, and Markdown benchmark output.
 
 ### `sandbox-prune`
 
