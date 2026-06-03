@@ -86,6 +86,9 @@ struct BenchmarkReport {
     score: f64,
     correctness: f64,
     efficiency: f64,
+    duration_ms: u64,
+    tokens_total: u64,
+    tool_calls_total: usize,
     scenarios_total: usize,
     scenarios_passed: usize,
     scenarios_failed: usize,
@@ -259,6 +262,18 @@ fn run_suite(
     let score = weighted_average(&scenarios, total_weight, |scenario| scenario.score);
     let correctness = weighted_average(&scenarios, total_weight, |scenario| scenario.correctness);
     let efficiency = weighted_average(&scenarios, total_weight, |scenario| scenario.efficiency);
+    let duration_ms = scenarios
+        .iter()
+        .map(|scenario| scenario.duration_ms)
+        .sum::<u64>();
+    let tokens_total = scenarios
+        .iter()
+        .map(|scenario| scenario.tokens_total)
+        .sum::<u64>();
+    let tool_calls_total = scenarios
+        .iter()
+        .map(|scenario| scenario.tool_calls_total)
+        .sum::<usize>();
     let passed = scenarios
         .iter()
         .filter(|scenario| scenario.result == "PASS")
@@ -272,6 +287,9 @@ fn run_suite(
         score,
         correctness,
         efficiency,
+        duration_ms,
+        tokens_total,
+        tool_calls_total,
         scenarios_total: scenarios.len(),
         scenarios_passed: passed,
         scenarios_failed: scenarios.len().saturating_sub(passed),
@@ -388,6 +406,9 @@ fn scenario_cap(record: &TraceRecord) -> Option<f64> {
     {
         return Some(40.0);
     }
+    if record.assertions.iter().any(|assertion| !assertion.pass) {
+        return Some(79.0);
+    }
     None
 }
 
@@ -493,7 +514,7 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
     if let Some(model) = &opts.model {
         println!("  {}", ui::kv("model", model));
     }
-    println!("  {}", ui::kv("score", format!("{:.1}/100", report.score)));
+    println!("  {}", ui::kv("score", format!("{:.2}/100", report.score)));
     println!(
         "  {}",
         ui::kv("correctness", format!("{:.1}", report.correctness))
@@ -502,13 +523,19 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
         "  {}",
         ui::kv("efficiency", format!("{:.1}", report.efficiency))
     );
+    println!(
+        "  {}",
+        ui::kv("duration", format_duration(report.duration_ms))
+    );
+    println!("  {}", ui::kv("tokens", report.tokens_total));
+    println!("  {}", ui::kv("tools", report.tool_calls_total));
     println!();
     println!("  {}", ui::section("Scenarios"));
     for scenario in &report.scenarios {
         let pass = scenario.result == "PASS";
         let tone = if pass { Tone::Success } else { Tone::Error };
         println!(
-            "  {} {:<8} {:<28} {:>5.1}  {}  {} tok  {} tools",
+            "  {} {:<8} {:<28} {:>6.2}  {}  {} tok  {} tools",
             ui::paint("●", tone),
             ui::paint(&scenario.result, tone),
             ui::paint(&scenario.name, Tone::Strong),
@@ -527,8 +554,9 @@ fn render_markdown(report: &BenchmarkReport) -> String {
         out.push_str(&format!("**Category:** {category}\n\n"));
     }
     out.push_str(&format!(
-        "**Score:** {:.1}/100 · **Correctness:** {:.1} · **Efficiency:** {:.1}\n\n",
+        "**Score:** {:.2}/100 · **Correctness:** {:.1} · **Efficiency:** {:.1} · **Duration:** {} · **Tokens:** {} · **Tools:** {}\n\n",
         report.score, report.correctness, report.efficiency
+        , format_duration(report.duration_ms), report.tokens_total, report.tool_calls_total
     ));
     out.push_str(
         "| Scenario | Result | Score | Correctness | Efficiency | Duration | Tokens | Tools |\n",
