@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -491,7 +491,34 @@ pub fn list_runtime_statuses(config: &crate::config::ProjectConfig) -> Vec<Runti
         ),
         preflight("codex", "OpenAI Codex via `codex exec --json`."),
     ];
+    for profile in crate::config::BUILTIN_ACP_AGENT_PROFILES {
+        let name = profile.name();
+        if let Some(agent) = config.acp_agents.get(name) {
+            statuses.push(preflight_dynamic(
+                format!("acp:{name}"),
+                format!(
+                    "ACP agent via `{}`{}.",
+                    agent.command,
+                    if agent.args.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", agent.args.join(" "))
+                    }
+                ),
+                &agent.command,
+            ));
+        } else {
+            statuses.push(preflight_dynamic(
+                format!("acp:{name}"),
+                format!("Built-in ACP agent via `{}`.", profile.display_command()),
+                profile.command(),
+            ));
+        }
+    }
     for (name, agent) in &config.acp_agents {
+        if crate::config::BuiltinAcpAgentProfile::from_name(name).is_some() {
+            continue;
+        }
         statuses.push(preflight_dynamic(
             format!("acp:{name}"),
             format!(
@@ -526,21 +553,19 @@ pub fn runtime_status_for_scenario(
                     ),
                 };
             };
-            let Some(agent) = config.acp_agents.get(agent_name) else {
-                return RuntimeStatus {
+            match crate::config::resolve_acp_agent_for_run(config, agent_name) {
+                Ok(agent) => preflight_dynamic(
+                    format!("acp:{agent_name}"),
+                    format!("ACP agent via `{}`.", agent.display_command()),
+                    agent.command(),
+                ),
+                Err(err) => RuntimeStatus {
                     name: format!("acp:{agent_name}"),
                     description: "Configured ACP agent.".to_string(),
                     ready: false,
-                    message: Some(format!(
-                        "`runtime: acp` references unknown agent `{agent_name}`"
-                    )),
-                };
-            };
-            preflight_dynamic(
-                format!("acp:{agent_name}"),
-                format!("ACP agent via `{}`.", agent.command),
-                &agent.command,
-            )
+                    message: Some(err.to_string()),
+                },
+            }
         }
         "claude" => preflight(
             "claude",
@@ -568,8 +593,26 @@ pub struct RuntimeRunRequest {
     pub skill_install_rel_path: Option<String>,
     pub progress: bool,
     pub idle_warn_seconds: u64,
+    pub acp_turn_timeout_seconds: u64,
+    pub scenario_env: BTreeMap<String, String>,
     pub acp_agent_name: Option<String>,
-    pub acp_agent: Option<crate::config::AcpAgentConfig>,
+    pub acp_agent: Option<crate::config::ResolvedAcpAgent>,
+    pub mcp_servers: Vec<crate::config::NamedMcpServerConfig>,
+    pub acp_config: AcpConfigRequest,
+    pub acp_transcript: Option<AcpTranscriptConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AcpConfigRequest {
+    pub model: Option<String>,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpTranscriptConfig {
+    pub path: PathBuf,
+    pub redaction_values: Vec<String>,
 }
 
 pub fn runtime_ready(name: &str) -> bool {
@@ -606,7 +649,7 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
         };
         let stdout = if idx == 0 {
             let args = build_codex_args(&req);
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
         } else {
             let session = session_id.clone().unwrap_or_else(|| "--last".to_string());
             let args = vec![
@@ -616,7 +659,7 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
                 "--json".to_string(),
                 "-".to_string(),
             ];
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
         };
         let parsed = parse_codex_jsonl(&stdout, max_turns, max_turns_user_set)?;
         if session_id.is_none() {
@@ -678,6 +721,7 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             &args,
             Some(&req.cwd),
             None,
+            &req.scenario_env,
             if req.progress {
                 ProcessOutputMode::StreamJsonl
             } else {
@@ -707,12 +751,14 @@ fn run_process_with_stdin_jsonl(
     args: &[String],
     stdin: &str,
     progress: bool,
+    env: &BTreeMap<String, String>,
 ) -> anyhow::Result<String> {
     run_process(
         command,
         args,
         None,
         Some(stdin),
+        env,
         if progress {
             ProcessOutputMode::StreamJsonl
         } else {
@@ -726,12 +772,14 @@ fn run_process(
     args: &[String],
     cwd: Option<&std::path::Path>,
     stdin: Option<&str>,
+    env: &BTreeMap<String, String>,
     output_mode: ProcessOutputMode,
 ) -> anyhow::Result<String> {
     let mut process = platform_command(command, args);
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
     }
+    process.envs(env);
     let mut child = process
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1613,8 +1661,13 @@ mod tests {
             skill_install_rel_path: Some(".claude/skills/demo/SKILL.md".to_string()),
             progress: false,
             idle_warn_seconds: 30,
+            acp_turn_timeout_seconds: crate::config::DEFAULT_ACP_TURN_TIMEOUT_SECONDS,
+            scenario_env: BTreeMap::new(),
             acp_agent_name: None,
             acp_agent: None,
+            mcp_servers: Vec::new(),
+            acp_config: AcpConfigRequest::default(),
+            acp_transcript: None,
         };
 
         let args = build_claude_args(&req, 3, None, "do it", true);

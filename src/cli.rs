@@ -15,16 +15,19 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     Init {
         #[arg(long)]
         force: bool,
         #[arg(long, default_value = "./skills")]
         skills_dir: String,
-        #[arg(long, default_value = crate::config::DEFAULT_MODEL)]
-        model: String,
+        #[arg(long)]
+        model: Option<String>,
         #[arg(long, default_value = "bypassPermissions")]
         permission_mode: String,
+        #[arg(long)]
+        acp_agent: Option<String>,
     },
     Run {
         skill: Option<String>,
@@ -37,9 +40,17 @@ enum Commands {
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        reasoning: Option<String>,
+        #[arg(long)]
         runtime: Option<String>,
         #[arg(long)]
         agent: Option<String>,
+        #[arg(long)]
+        mcp_profile: Option<String>,
+        #[arg(long)]
+        acp_log: Option<PathBuf>,
         #[arg(long)]
         filter: Option<String>,
         #[arg(long)]
@@ -50,6 +61,10 @@ enum Commands {
         quiet: bool,
         #[arg(long, default_value_t = 30)]
         idle_warn: u64,
+        #[arg(long)]
+        setup_timeout: Option<u64>,
+        #[arg(long)]
+        acp_turn_timeout: Option<u64>,
         /// Output format: live (default), json, or markdown
         #[arg(long, value_enum, default_value_t)]
         format: crate::commands::run::OutputFormat,
@@ -118,11 +133,13 @@ pub fn main_entry() -> anyhow::Result<()> {
             skills_dir,
             model,
             permission_mode,
+            acp_agent,
         } => init_command(InitOptions {
             force,
             skills_dir,
             model,
             permission_mode,
+            acp_agent,
         })?,
         Commands::Run {
             skill,
@@ -130,13 +147,19 @@ pub fn main_entry() -> anyhow::Result<()> {
             file,
             dir,
             model,
+            mode,
+            reasoning,
             runtime,
             agent,
+            mcp_profile,
+            acp_log,
             filter,
             dry_run,
             keep_sandbox,
             quiet,
             idle_warn,
+            setup_timeout,
+            acp_turn_timeout,
             format,
         } => run_command(RunOptions {
             skill,
@@ -144,13 +167,19 @@ pub fn main_entry() -> anyhow::Result<()> {
             file,
             dir,
             model,
+            mode,
+            reasoning,
             runtime,
             agent,
+            mcp_profile,
+            acp_log,
             filter,
             dry_run,
             keep_sandbox,
             quiet,
             idle_warn_seconds: idle_warn,
+            setup_timeout_seconds: setup_timeout,
+            acp_turn_timeout_seconds: acp_turn_timeout,
             format,
         })?,
         Commands::History {

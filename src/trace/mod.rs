@@ -127,6 +127,8 @@ impl TraceRecord {
             runner: TraceRunner {
                 runtime: "claude".to_string(),
                 model: crate::config::DEFAULT_MODEL.to_string(),
+                mode: None,
+                reasoning: None,
                 permission_mode: "bypassPermissions".to_string(),
                 started_at: Utc::now(),
                 finished_at: Utc::now(),
@@ -135,6 +137,7 @@ impl TraceRecord {
                 max_turns_user_set: false,
                 turns_used,
                 hit_max_turns: false,
+                stopped_reason: "end_turn".to_string(),
                 session_id: None,
                 sandbox_path: None,
             },
@@ -191,6 +194,10 @@ pub struct TraceRunner {
     #[serde(default)]
     pub runtime: String,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     pub permission_mode: String,
     pub started_at: DateTime<Utc>,
     pub finished_at: DateTime<Utc>,
@@ -199,6 +206,8 @@ pub struct TraceRunner {
     pub max_turns_user_set: bool,
     pub turns_used: u32,
     pub hit_max_turns: bool,
+    #[serde(default)]
+    pub stopped_reason: String,
     pub session_id: Option<String>,
     pub sandbox_path: Option<String>,
 }

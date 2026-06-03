@@ -49,7 +49,9 @@ Once installed, upgrade in place with the built-in updater:
 ai-tester update
 ```
 
-Requires Rust **1.82 or newer** when building from source.
+Requires Rust **1.82 or newer** when building from source. The MSRV is fixed in
+`Cargo.toml` with `rust-version = "1.82"` and checked by a dedicated Rust 1.82
+CI job.
 
 ## Prerequisites
 
@@ -57,7 +59,7 @@ Per runtime you plan to use:
 
 - **Claude** (`runtime: claude`, default): `claude` CLI installed and logged in.
 - **Codex** (`runtime: codex`): `codex` CLI installed and logged in.
-- **ACP** (`runtime: acp`): a configured ACP agent command in `.ai-tester.yaml`.
+- **ACP** (`runtime: acp`): a built-in ACP profile or configured ACP agent command in `.ai-tester.yaml`.
 
 Check local readiness:
 
@@ -95,16 +97,38 @@ skills_dir: ./skills
 defaults:
   model: claude-sonnet-4-6
   permission_mode: bypassPermissions
+  setup_timeout_seconds: 60
+  acp_turn_timeout_seconds: 300
   # Optional for ACP:
   # runtime: acp
   # agent: gemini
+  # mode: plan
+  # reasoning: high
 
-# Optional ACP agent registry:
+# Optional ACP agent registry for manual overrides/custom agents:
 # acp_agents:
 #   gemini:
 #     command: gemini
 #     args: ["--experimental-acp"]
 #     env: {}
+
+# Optional MCP registry forwarded to ACP sessions:
+# mcp_servers:
+#   codegraph:
+#     command: mock-codegraph
+#     args: ["--fixture", "graph.json"]
+#     env:
+#       API_TOKEN: secret
+#   docs:
+#     type: http
+#     url: http://127.0.0.1:3001/mcp
+#     headers:
+#       Authorization: Bearer secret
+# mcp_profiles:
+#   mock:
+#     servers: [codegraph]
+#   full:
+#     servers: [codegraph, docs]
 ```
 
 With this file at a project root, skills live at:
@@ -132,6 +156,11 @@ ai-tester run <skill>
 ai-tester run <skill> --scenario <scenario-id>
 ai-tester run --file ./scenario.yaml --runtime codex
 ai-tester run --file ./scenario.yaml --runtime acp --agent gemini
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --model gpt-5-codex --mode plan --reasoning high
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --mcp-profile full
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-log ./acp-logs
+ai-tester run --file ./scenario.yaml --runtime acp --agent gemini --acp-turn-timeout 120
+ai-tester run --file ./scenario.yaml --setup-timeout 10
 ai-tester run --dir ./prompts --runtime codex
 
 # Choose output format (default: live events + summary)
@@ -184,11 +213,12 @@ ai-tester run <skill> --format markdown > report.md
 
 ### `sandbox-prune`
 
-Removes orphan `ai-tester-*` sandbox directories left behind in the system temp
-directory by crashed runs or `--keep-sandbox`. Runs as a **dry run by default** —
-it lists what would be deleted; pass `--yes` to actually remove them. Use
-`--min-age <seconds>` (default `60`) to only prune sandboxes older than the given
-age, so active runs are never touched.
+Normal runs clean their sandbox automatically when the scenario scope exits.
+`sandbox-prune` is housekeeping for orphan `ai-tester-*` sandbox directories left
+behind by process crashes/aborts or by explicit `--keep-sandbox`. It runs as a
+**dry run by default** — it lists what would be deleted; pass `--yes` to actually
+remove them. Use `--min-age <seconds>` (default `60`) to only prune sandboxes
+older than the given age, so active runs are never touched.
 
 ```bash
 ai-tester sandbox-prune              # dry run: list orphans
@@ -257,6 +287,9 @@ ACP scenarios select a configured agent by name:
 runner:
   runtime: acp
   agent: gemini
+  model: gpt-5-codex
+  mode: plan
+  reasoning: high
   permission_mode: bypassPermissions
 ```
 
@@ -334,6 +367,7 @@ fixtures:
 
   setup_commands:
     - git tag v0.1.0
+  setup_timeout_seconds: 30
 
   env:
     MY_FLAG: "1"
@@ -351,9 +385,30 @@ Order of operations:
 8. Write `files_unstaged`.
 9. Run `setup_commands`.
 
+`git_branch` and `files_staged` require `git_init: true`; scenarios that set
+those fields without git initialization are rejected during dry-run validation.
+
 `setup_commands` run through `cmd /C` on Windows and `/bin/sh -c` on Unix.
+Each setup command has its own timeout. The default is 60 seconds; configure it
+with `defaults.setup_timeout_seconds`, override it per scenario with
+`fixtures.setup_timeout_seconds`, or override both with
+`ai-tester run --setup-timeout <seconds>`. Precedence is CLI > scenario fixtures
+> project defaults > 60. Values must be positive. On timeout, `ai-tester` kills
+the whole setup process tree and reports the command plus stdout/stderr previews.
+
+`fixtures.env` is scenario-scoped: it is applied to setup commands and runtime
+subprocesses for Claude, Codex, and ACP. Precedence is predictable:
+
+- Setup, Claude, and Codex: host env < `fixtures.env`.
+- ACP agent process: host env < `fixtures.env` < `acp_agents.<name>.env`.
+- ACP terminal bridge: host env < `fixtures.env` < `terminal/create.env`.
+- MCP server env/header config is forwarded through ACP session config and is not merged with `fixtures.env`.
 
 ## Assertions
+
+Assertion `id` values must be non-empty and unique within a scenario. Assertion
+`weight` values must be finite and positive, and `turn_count_at_most.max` must
+be positive. Invalid assertion specs are rejected during dry-run validation.
 
 ### `tool_called`
 
@@ -363,11 +418,26 @@ Order of operations:
   tool: Bash
   args_match:
     command: "^git status"
+  capture: [command]
+  capture_max_chars: 200
 
 - id: calls-codegraph
   type: tool_called
   tool_pattern: "^mcp__.*__codegraph_context$"
+
+- id: acp-runs-tests
+  type: tool_called
+  tool_kind: execute
+  title_pattern: "Run tests"
+  raw_input_match:
+    command: "cargo test"
 ```
+
+`tool_called` and `no_tool_called` must declare exactly one primary selector:
+`tool`, `tool_pattern`, or ACP-oriented `tool_kind`. `title_pattern` filters
+ACP calls by `_acpTitle`. `raw_input_match` matches ACP raw input fields: when
+the trace input contains `rawInput`, paths are resolved under it; otherwise they
+match the flattened ACP input.
 
 ### `tool_call_sequence`
 
@@ -378,10 +448,28 @@ Order of operations:
     - tool: Bash
       args_match:
         command: "^git status"
+      capture: [command]
     - tool: Bash
       args_match:
         command: "^git commit"
+      capture: [command]
+    - tool_kind: execute
+      title_pattern: "Run tests"
+      raw_input_match:
+        command: "cargo test"
+  capture_max_chars: 200
 ```
+
+`capture` stores top-level tool input fields from the matched tool call in the
+assertion result. Captures are included in JSON traces and shown in live and
+Markdown output. `capture_max_chars` truncates long captured values.
+
+`args_match` keys can address nested trace input fields. Keys starting with `/`
+use JSON Pointer, such as `/rawInput/command`. Other keys first try an exact
+top-level field for backward compatibility, then dot-path lookup with numeric
+array indexes, such as `rawInput.command` or `_acpLocations.0.path`. Use JSON
+Pointer for field names that contain literal dots. Missing paths are treated as
+an empty string, so `^$` matches an absent field and non-empty regexes do not.
 
 ### `no_tool_called`
 
@@ -413,7 +501,11 @@ Order of operations:
 
 ### `file_read`
 
-Runtime-neutral check that a file was actually inspected. It matches Claude `Read(file_path)` and Codex `Bash(command)` reader commands such as `sed`, `cat`, `nl`, `rg`, `grep`, `head`, and `tail`.
+Runtime-neutral check that a file was actually inspected. It matches Claude
+`Read(file_path)`, Codex `Bash(command)` reader commands such as `sed`, `cat`,
+`nl`, `rg`, `grep`, `head`, and `tail`, and ACP `read` calls with `path`,
+`file_path`, `rawInput.path`, `rawInput.file_path`, or `_acpLocations` path/URI
+metadata. ACP `execute` calls use the same reader-command detection as Bash.
 
 ```yaml
 - id: reads-runtime
@@ -461,7 +553,17 @@ The Rust rewrite uses external CLIs and parses JSONL output. It does not embed t
 
 ### ACP
 
-ACP agents are configured in `.ai-tester.yaml`:
+ACP includes built-in compatibility profiles for `gemini`, `zed-claude`, and `zed-codex`.
+They run through `npx` using the upstream ACP helper commands, so a minimal ACP config does
+not need an `acp_agents` block:
+
+```yaml
+defaults:
+  runtime: acp
+  agent: gemini
+```
+
+Manual `acp_agents` entries are still supported and override a built-in with the same name:
 
 ```yaml
 defaults:
@@ -470,12 +572,46 @@ defaults:
 
 acp_agents:
   gemini:
-    command: gemini
+    command: ./scripts/local-gemini-acp
     args: ["--experimental-acp"]
     env: {}
 ```
 
-Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, then sends each scripted user prompt through that session. `runner.model` is not sent over ACP in this MVP; pass model or mode flags through the configured `args`.
+MCP servers can be forwarded to ACP sessions:
+
+```yaml
+mcp_servers:
+  codegraph:
+    command: mock-codegraph
+    args: ["--fixture", "graph.json"]
+    env:
+      API_TOKEN: secret
+  docs:
+    type: http
+    url: http://127.0.0.1:3001/mcp
+    headers:
+      Authorization: Bearer secret
+
+mcp_profiles:
+  mock:
+    servers: [codegraph]
+  full:
+    servers: [codegraph, docs]
+```
+
+`ai-tester init --acp-agent gemini` creates a minimal built-in ACP template. `ai-tester runtimes` shows both configured ACP agents and the built-in profiles with their resolved commands. Built-ins inherit the current process environment; use a manual `acp_agents` override when a profile needs explicit env values or a pinned command.
+
+Scenario `runner.agent` or `ai-tester run --agent <name>` chooses the ACP agent. `defaults.mcp_profile`, scenario `runner.mcp_profile`, or `ai-tester run --mcp-profile <name>` chooses a profile from `mcp_profiles`; CLI has highest precedence. Scenario-level `mcp_servers` may override or add servers for a single run. The ACP runtime sends `initialize` with protocol version `1`, creates one session with the sandbox as `cwd`, forwards the effective MCP servers in `session/new.mcpServers`, applies requested ACP model/mode/reasoning config when the agent exposes compatible session options, then sends each scripted user prompt through that session.
+
+Built-in auth requirements come from the underlying agent CLIs: Gemini supports Gemini CLI auth or `GEMINI_API_KEY` ([Gemini CLI auth docs](https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html)); `zed-claude` uses Claude Code auth or Anthropic credentials such as `ANTHROPIC_API_KEY` ([Claude Code auth docs](https://code.claude.com/docs/en/authentication)); `zed-codex` uses Codex/OpenAI credentials ([Codex CLI sign-in docs](https://help.openai.com/en/articles/11381614-api-codex-cli-and-sign-in-with-chatgpt)).
+
+ACP model/mode negotiation uses `runner.model`, `runner.mode`, and `runner.reasoning`, with CLI flags `--model`, `--mode`, and `--reasoning` taking precedence. `runner.mode` is an ACP session mode/config selector and is separate from `permission_mode`. Explicit values from CLI, scenario YAML, or project defaults fail fast when the agent does not expose a matching option or value; the built-in model default is not forced onto ACP agents that do not advertise model selection. Successful ACP traces include an `ACP effective config` diagnostic with the applied model/mode/reasoning.
+
+ACP prompt turns also have a wall-clock timeout separate from idle protocol progress. The default is 300 seconds; configure it with `defaults.acp_turn_timeout_seconds`, override it per scenario with `runner.acp_turn_timeout_seconds`, or override both with `ai-tester run --acp-turn-timeout <seconds>`. Precedence is CLI > scenario runner > project defaults > 300, and values must be positive. On timeout, `ai-tester` records `runner.stoppedReason` as `timeout` or `cancelled`, sends `session/cancel`, attempts `session/close`, and tears down the managed ACP process tree.
+
+Supported MCP transports are stdio (default when `type` is omitted), `http`, and `sse`. Stdio servers use `command`, optional `args`, and optional `env`; HTTP/SSE servers use `url` and optional `headers`. Env and header values are redacted in ai-tester trace diagnostics.
+
+For ACP protocol debugging, pass `--acp-log <dir>`. The path is treated as a directory relative to the current working directory unless absolute. Each ACP scenario writes one redacted JSONL transcript with raw stdin/stdout/stderr lines captured through the ACP transport debug hook. Protocol errors print the transcript path in live output so incompatible agents can be inspected without leaking configured env/header secrets.
 
 ACP traces count one assistant turn per scripted user prompt sent to the ACP session. This differs from the Claude and Codex adapters, which derive turns from their runtime event streams. As a result, `turn_count_at_most` and explicit `max_turns` limits are comparable within ACP runs but not strictly identical across runtimes.
 
@@ -532,7 +668,7 @@ Trace records include:
 
 - skill metadata and source hashes
 - scenario metadata
-- runner timing, model, permission mode, max turns, and sandbox path
+- runner timing, model, optional ACP mode/reasoning, permission mode, max turns, and sandbox path
 - normalized turns and tool calls
 - final output
 - assertion results and weighted score

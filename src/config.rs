@@ -1,12 +1,16 @@
 pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 pub const INTERNAL_MAX_TURNS: u32 = 40;
 pub const DEFAULT_PASS_THRESHOLD: f64 = 0.85;
+pub const DEFAULT_SETUP_TIMEOUT_SECONDS: u64 = 60;
+pub const DEFAULT_ACP_TURN_TIMEOUT_SECONDS: u64 = 300;
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use anyhow::{bail, Context};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectConfig {
@@ -16,14 +20,21 @@ pub struct ProjectConfig {
     pub runs_dir: PathBuf,
     pub defaults: ProjectDefaults,
     pub acp_agents: BTreeMap<String, AcpAgentConfig>,
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+    pub mcp_profiles: BTreeMap<String, McpProfileConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProjectDefaults {
     pub runtime: Option<String>,
     pub model: Option<String>,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     pub permission_mode: Option<String>,
+    pub setup_timeout_seconds: Option<u64>,
+    pub acp_turn_timeout_seconds: Option<u64>,
     pub agent: Option<String>,
+    pub mcp_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -35,6 +46,148 @@ pub struct AcpAgentConfig {
     pub env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinAcpAgentProfile {
+    Gemini,
+    ZedClaude,
+    ZedCodex,
+}
+
+pub const BUILTIN_ACP_AGENT_PROFILES: [BuiltinAcpAgentProfile; 3] = [
+    BuiltinAcpAgentProfile::Gemini,
+    BuiltinAcpAgentProfile::ZedClaude,
+    BuiltinAcpAgentProfile::ZedCodex,
+];
+
+impl BuiltinAcpAgentProfile {
+    pub fn from_name(name: &str) -> Option<Self> {
+        BUILTIN_ACP_AGENT_PROFILES
+            .iter()
+            .copied()
+            .find(|profile| profile.name() == name)
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Gemini => "gemini",
+            Self::ZedClaude => "zed-claude",
+            Self::ZedCodex => "zed-codex",
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        "npx"
+    }
+
+    pub fn args(self) -> &'static [&'static str] {
+        match self {
+            Self::Gemini => &[
+                "-y",
+                "--",
+                "@google/gemini-cli@latest",
+                "--experimental-acp",
+            ],
+            Self::ZedClaude => &["-y", "@zed-industries/claude-code-acp@latest"],
+            Self::ZedCodex => &["-y", "@zed-industries/codex-acp@latest"],
+        }
+    }
+
+    pub fn display_command(self) -> String {
+        format!("{} {}", self.command(), self.args().join(" "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpAgentLaunch {
+    Configured(AcpAgentConfig),
+    Builtin(BuiltinAcpAgentProfile),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAcpAgent {
+    pub name: String,
+    pub launch: AcpAgentLaunch,
+}
+
+impl ResolvedAcpAgent {
+    pub fn command(&self) -> &str {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => &config.command,
+            AcpAgentLaunch::Builtin(profile) => profile.command(),
+        }
+    }
+
+    pub fn args(&self) -> Vec<String> {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => config.args.clone(),
+            AcpAgentLaunch::Builtin(profile) => profile
+                .args()
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect(),
+        }
+    }
+
+    pub fn display_command(&self) -> String {
+        let args = self.args();
+        if args.is_empty() {
+            self.command().to_string()
+        } else {
+            format!("{} {}", self.command(), args.join(" "))
+        }
+    }
+
+    pub fn configured_env(&self) -> Option<&BTreeMap<String, String>> {
+        match &self.launch {
+            AcpAgentLaunch::Configured(config) => Some(&config.env),
+            AcpAgentLaunch::Builtin(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum McpServerTransport {
+    #[default]
+    Stdio,
+    Http,
+    Sse,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpServerConfig {
+    #[serde(default, rename = "type")]
+    pub transport: McpServerTransport,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct McpProfileConfig {
+    #[serde(default)]
+    pub servers: Vec<String>,
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedMcpServerConfig {
+    pub name: String,
+    pub config: McpServerConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerResolution {
+    pub profile: Option<String>,
+    pub servers: Vec<NamedMcpServerConfig>,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawProjectConfig {
     skills_dir: Option<String>,
@@ -42,14 +195,23 @@ struct RawProjectConfig {
     defaults: Option<RawProjectDefaults>,
     #[serde(default)]
     acp_agents: BTreeMap<String, AcpAgentConfig>,
+    #[serde(default)]
+    mcp_servers: BTreeMap<String, McpServerConfig>,
+    #[serde(default)]
+    mcp_profiles: BTreeMap<String, McpProfileConfig>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct RawProjectDefaults {
     runtime: Option<String>,
     model: Option<String>,
+    mode: Option<String>,
+    reasoning: Option<String>,
     permission_mode: Option<String>,
+    setup_timeout_seconds: Option<u64>,
+    acp_turn_timeout_seconds: Option<u64>,
     agent: Option<String>,
+    mcp_profile: Option<String>,
 }
 
 pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<ProjectConfig> {
@@ -75,6 +237,22 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
     if let Some(config_path) = found {
         let root_dir = config_path.parent().unwrap_or(&start).to_path_buf();
         let raw: RawProjectConfig = yaml_serde::from_str(&fs::read_to_string(&config_path)?)?;
+        if raw
+            .defaults
+            .as_ref()
+            .and_then(|defaults| defaults.setup_timeout_seconds)
+            == Some(0)
+        {
+            bail!("defaults.setup_timeout_seconds must be positive");
+        }
+        if raw
+            .defaults
+            .as_ref()
+            .and_then(|defaults| defaults.acp_turn_timeout_seconds)
+            == Some(0)
+        {
+            bail!("defaults.acp_turn_timeout_seconds must be positive");
+        }
         let skills_dir = raw
             .skills_dir
             .as_deref()
@@ -93,13 +271,23 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             defaults: ProjectDefaults {
                 runtime: raw.defaults.as_ref().and_then(|d| d.runtime.clone()),
                 model: raw.defaults.as_ref().and_then(|d| d.model.clone()),
+                mode: raw.defaults.as_ref().and_then(|d| d.mode.clone()),
+                reasoning: raw.defaults.as_ref().and_then(|d| d.reasoning.clone()),
                 permission_mode: raw
                     .defaults
                     .as_ref()
                     .and_then(|d| d.permission_mode.clone()),
-                agent: raw.defaults.and_then(|d| d.agent),
+                setup_timeout_seconds: raw.defaults.as_ref().and_then(|d| d.setup_timeout_seconds),
+                acp_turn_timeout_seconds: raw
+                    .defaults
+                    .as_ref()
+                    .and_then(|d| d.acp_turn_timeout_seconds),
+                agent: raw.defaults.as_ref().and_then(|d| d.agent.clone()),
+                mcp_profile: raw.defaults.and_then(|d| d.mcp_profile),
             },
             acp_agents: raw.acp_agents,
+            mcp_servers: raw.mcp_servers,
+            mcp_profiles: raw.mcp_profiles,
         })
     } else {
         Ok(ProjectConfig {
@@ -109,8 +297,115 @@ pub fn load_project_config(start_dir: impl AsRef<Path>) -> anyhow::Result<Projec
             runs_dir: start.join("runs"),
             defaults: ProjectDefaults::default(),
             acp_agents: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            mcp_profiles: BTreeMap::new(),
         })
     }
+}
+
+pub fn resolve_mcp_servers_for_run(
+    project: &ProjectConfig,
+    scenario_mcp_servers: &BTreeMap<String, McpServerConfig>,
+    runner_mcp_profile: Option<&str>,
+    cli_mcp_profile: Option<&str>,
+) -> anyhow::Result<McpServerResolution> {
+    let selected_profile = non_empty(cli_mcp_profile)
+        .or_else(|| non_empty(runner_mcp_profile))
+        .or_else(|| non_empty(project.defaults.mcp_profile.as_deref()));
+    let mut registry = project.mcp_servers.clone();
+    let mut active_names = None;
+
+    if let Some(profile_name) = selected_profile {
+        let profile = project
+            .mcp_profiles
+            .get(profile_name)
+            .with_context(|| format!("unknown MCP profile `{profile_name}`"))?;
+        for (name, server) in &profile.mcp_servers {
+            registry.insert(name.clone(), server.clone());
+        }
+        active_names = Some(profile.servers.clone());
+    }
+
+    let scenario_names = scenario_mcp_servers.keys().cloned().collect::<Vec<_>>();
+    for (name, server) in scenario_mcp_servers {
+        registry.insert(name.clone(), server.clone());
+    }
+
+    let names = if let Some(profile_names) = active_names {
+        unique_ordered(
+            profile_names
+                .into_iter()
+                .chain(scenario_names)
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        registry.keys().cloned().collect::<Vec<_>>()
+    };
+
+    let mut servers = Vec::new();
+    for name in names {
+        let config = registry
+            .get(&name)
+            .with_context(|| format!("unknown MCP server `{name}` in selected MCP profile"))?;
+        validate_mcp_server(&name, config)?;
+        servers.push(NamedMcpServerConfig {
+            name,
+            config: config.clone(),
+        });
+    }
+
+    Ok(McpServerResolution {
+        profile: selected_profile.map(ToOwned::to_owned),
+        servers,
+    })
+}
+
+pub fn resolve_acp_agent_for_run(
+    project: &ProjectConfig,
+    name: &str,
+) -> anyhow::Result<ResolvedAcpAgent> {
+    if let Some(config) = project.acp_agents.get(name) {
+        return Ok(ResolvedAcpAgent {
+            name: name.to_string(),
+            launch: AcpAgentLaunch::Configured(config.clone()),
+        });
+    }
+
+    if let Some(profile) = BuiltinAcpAgentProfile::from_name(name) {
+        return Ok(ResolvedAcpAgent {
+            name: name.to_string(),
+            launch: AcpAgentLaunch::Builtin(profile),
+        });
+    }
+
+    bail!(
+        "unknown ACP agent `{name}`. Available ACP agents: {}",
+        available_acp_agent_names(project).join(", ")
+    )
+}
+
+pub fn available_acp_agent_names(project: &ProjectConfig) -> Vec<String> {
+    unique_ordered(
+        project
+            .acp_agents
+            .keys()
+            .cloned()
+            .chain(
+                BUILTIN_ACP_AGENT_PROFILES
+                    .iter()
+                    .map(|profile| profile.name().to_string()),
+            )
+            .collect(),
+    )
+}
+
+pub fn mcp_servers_diagnostic(servers: &[NamedMcpServerConfig]) -> String {
+    let values = servers
+        .iter()
+        .map(redacted_mcp_server_value)
+        .collect::<Vec<_>>();
+    let json = serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string());
+    format!("ACP MCP servers: {json}")
 }
 
 /// Resolve the runs directory for the project rooted at the current working dir.
@@ -123,5 +418,113 @@ fn absolutize(path: &Path) -> anyhow::Result<PathBuf> {
         Ok(path.to_path_buf())
     } else {
         Ok(std::env::current_dir()?.join(path))
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    })
+}
+
+fn unique_ordered(names: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeMap::<String, ()>::new();
+    let mut out = Vec::new();
+    for name in names {
+        if seen.insert(name.clone(), ()).is_none() {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn validate_mcp_server(name: &str, config: &McpServerConfig) -> anyhow::Result<()> {
+    match config.transport {
+        McpServerTransport::Stdio => {
+            if config
+                .command
+                .as_deref()
+                .is_none_or(|command| command.trim().is_empty())
+            {
+                bail!("MCP server `{name}` with type `stdio` requires `command`");
+            }
+        }
+        McpServerTransport::Http => {
+            if config
+                .url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+            {
+                bail!("MCP server `{name}` with type `http` requires `url`");
+            }
+        }
+        McpServerTransport::Sse => {
+            if config
+                .url
+                .as_deref()
+                .is_none_or(|url| url.trim().is_empty())
+            {
+                bail!("MCP server `{name}` with type `sse` requires `url`");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn redacted_mcp_server_value(server: &NamedMcpServerConfig) -> Value {
+    let mut object = Map::new();
+    object.insert("name".to_string(), Value::String(server.name.clone()));
+    object.insert(
+        "type".to_string(),
+        Value::String(mcp_transport_name(&server.config.transport).to_string()),
+    );
+    match server.config.transport {
+        McpServerTransport::Stdio => {
+            if let Some(command) = &server.config.command {
+                object.insert("command".to_string(), Value::String(command.clone()));
+            }
+            object.insert(
+                "argsCount".to_string(),
+                Value::Number(serde_json::Number::from(server.config.args.len())),
+            );
+            object.insert(
+                "env".to_string(),
+                Value::Object(redacted_string_map(&server.config.env)),
+            );
+        }
+        McpServerTransport::Http | McpServerTransport::Sse => {
+            if let Some(url) = &server.config.url {
+                object.insert("url".to_string(), Value::String(redact_url(url)));
+            }
+            object.insert(
+                "headers".to_string(),
+                Value::Object(redacted_string_map(&server.config.headers)),
+            );
+        }
+    }
+    Value::Object(object)
+}
+
+fn redacted_string_map(values: &BTreeMap<String, String>) -> Map<String, Value> {
+    values
+        .keys()
+        .map(|key| (key.clone(), Value::String("<redacted>".to_string())))
+        .collect()
+}
+
+fn redact_url(url: &str) -> String {
+    crate::util::redaction::redact_url_query(url)
+}
+
+fn mcp_transport_name(transport: &McpServerTransport) -> &'static str {
+    match transport {
+        McpServerTransport::Stdio => "stdio",
+        McpServerTransport::Http => "http",
+        McpServerTransport::Sse => "sse",
     }
 }

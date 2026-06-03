@@ -8,8 +8,9 @@ use crate::ui::{self, Tone};
 pub struct InitOptions {
     pub force: bool,
     pub skills_dir: String,
-    pub model: String,
+    pub model: Option<String>,
     pub permission_mode: String,
+    pub acp_agent: Option<String>,
 }
 
 pub fn init_command(opts: InitOptions) -> anyhow::Result<i32> {
@@ -26,10 +27,34 @@ pub fn init_command(opts: InitOptions) -> anyhow::Result<i32> {
     if path.exists() && !opts.force {
         bail!(".ai-tester.yaml already exists; pass --force to overwrite");
     }
-    let content = format!(
-        "skills_dir: {}\n# runs_dir: runs   # where recorded run traces are stored (default: ./runs)\ndefaults:\n  model: {}\n  permission_mode: {}\n",
-        opts.skills_dir, opts.model, opts.permission_mode
+    let acp_agent = opts.acp_agent.as_deref();
+    if let Some(agent) = acp_agent {
+        if crate::config::BuiltinAcpAgentProfile::from_name(agent).is_none() {
+            let allowed = crate::config::BUILTIN_ACP_AGENT_PROFILES
+                .iter()
+                .map(|profile| profile.name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("Invalid --acp-agent `{agent}`. Expected one of: {allowed}");
+        }
+    }
+
+    let mut content = format!(
+        "skills_dir: {}\n# runs_dir: runs   # where recorded run traces are stored (default: ./runs)\ndefaults:\n",
+        opts.skills_dir
     );
+    if let Some(agent) = acp_agent {
+        content.push_str("  runtime: acp\n");
+        content.push_str(&format!("  agent: {agent}\n"));
+    }
+    if let Some(model) = opts
+        .model
+        .as_deref()
+        .or_else(|| acp_agent.is_none().then_some(crate::config::DEFAULT_MODEL))
+    {
+        content.push_str(&format!("  model: {model}\n"));
+    }
+    content.push_str(&format!("  permission_mode: {}\n", opts.permission_mode));
     fs::write(path, content)?;
     println!("{}", ui::header("ai-tester", "init"));
     println!(

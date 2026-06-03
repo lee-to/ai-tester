@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::scenario::AssertionSpec;
 use crate::trace::{ToolCallRecord, TraceRecord};
+use crate::util::path as path_util;
 use crate::util::regex::compile_pattern;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,48 +70,78 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             weight,
             tool,
             tool_pattern,
+            tool_kind,
+            title_pattern,
             args_match,
+            raw_input_match,
             call_index,
-            ..
+            capture,
+            capture_max_chars,
         } => evaluate_tool_called(
             id,
             *weight,
             tool.as_deref(),
             tool_pattern.as_deref(),
+            tool_kind.as_deref(),
+            title_pattern.as_deref(),
             args_match.as_ref(),
+            raw_input_match.as_ref(),
             *call_index,
+            capture.as_deref(),
+            *capture_max_chars,
             trace,
         ),
         AssertionSpec::ToolCallSequence {
             id,
             weight,
             sequence,
-            ..
+            capture_max_chars,
         } => {
             let mut next_index = 0usize;
+            let mut captures = Vec::new();
             let calls = all_tool_calls(trace);
-            for step in sequence {
-                let found = calls[next_index..].iter().position(|call| {
-                    call.name == step.tool
-                        && args_match(step.args_match.as_ref(), &call.input).unwrap_or(false)
-                });
+            for (step_index, step) in sequence.iter().enumerate() {
+                let matcher = match ToolCallMatcher::new(
+                    step.tool.as_deref(),
+                    None,
+                    step.tool_kind.as_deref(),
+                    step.title_pattern.as_deref(),
+                    step.args_match.as_ref(),
+                    step.raw_input_match.as_ref(),
+                ) {
+                    Ok(matcher) => matcher,
+                    Err(err) => return base_result(id, "tool_call_sequence", false, *weight, err),
+                };
+                let found = calls[next_index..]
+                    .iter()
+                    .position(|call| matcher.matches(call));
                 let Some(offset) = found else {
                     return base_result(
                         id,
                         "tool_call_sequence",
                         false,
                         *weight,
-                        format!("missing sequence step for tool `{}`", step.tool),
+                        format!("missing sequence step for {}", matcher.description()),
                     );
                 };
+                let matched_call = calls[next_index + offset];
+                captures.extend(capture_fields(
+                    &matched_call.input,
+                    step.capture.as_deref(),
+                    *capture_max_chars,
+                    Some(step_index + 1),
+                ));
                 next_index += offset + 1;
             }
-            base_result(
-                id,
-                "tool_call_sequence",
-                true,
-                *weight,
-                "sequence matched".to_string(),
+            with_captures(
+                base_result(
+                    id,
+                    "tool_call_sequence",
+                    true,
+                    *weight,
+                    "sequence matched".to_string(),
+                ),
+                captures,
             )
         }
         AssertionSpec::NoToolCalled {
@@ -118,14 +149,25 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
             weight,
             tool,
             tool_pattern,
+            tool_kind,
+            title_pattern,
             args_match: expected_args,
+            raw_input_match,
         } => {
-            let pattern = tool_pattern.as_ref().and_then(|p| compile_pattern(p).ok());
-            let matched = all_tool_calls(trace).into_iter().find(|call| {
-                let tool_ok = tool.as_ref().is_some_and(|t| call.name == *t)
-                    || pattern.as_ref().is_some_and(|re| re.is_match(&call.name));
-                tool_ok && args_match(expected_args.as_ref(), &call.input).unwrap_or(false)
-            });
+            let matcher = match ToolCallMatcher::new(
+                tool.as_deref(),
+                tool_pattern.as_deref(),
+                tool_kind.as_deref(),
+                title_pattern.as_deref(),
+                expected_args.as_ref(),
+                raw_input_match.as_ref(),
+            ) {
+                Ok(matcher) => matcher,
+                Err(err) => return base_result(id, "no_tool_called", false, *weight, err),
+            };
+            let matched = all_tool_calls(trace)
+                .into_iter()
+                .find(|call| matcher.matches(call));
             if let Some(call) = matched {
                 base_result(
                     id,
@@ -284,7 +326,47 @@ fn file_read_call_matches(call: &ToolCallRecord, path_re: &regex::Regex) -> bool
             .get("command")
             .map(value_to_string)
             .is_some_and(|command| bash_command_reads_path(&command, path_re)),
+        "fs/read_text_file" => call
+            .input
+            .get("path")
+            .map(value_to_string)
+            .is_some_and(|path| path_re.is_match(&path)),
+        "read" => acp_path_candidates(&call.input)
+            .iter()
+            .any(|path| path_re.is_match(path)),
+        "execute" => acp_command(&call.input)
+            .as_deref()
+            .is_some_and(|command| bash_command_reads_path(command, path_re)),
         _ => false,
+    }
+}
+
+fn acp_command(input: &Value) -> Option<String> {
+    value_at_path(input, "command")
+        .or_else(|| value_at_path(input, "rawInput.command"))
+        .map(value_to_string)
+        .filter(|command| !command.trim().is_empty())
+}
+
+fn acp_path_candidates(input: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    for field in ["path", "file_path", "rawInput.path", "rawInput.file_path"] {
+        push_string_value(&mut paths, value_at_path(input, field));
+    }
+    if let Some(Value::Array(locations)) = value_at_path(input, "_acpLocations") {
+        for location in locations {
+            push_string_value(&mut paths, value_at_path(location, "path"));
+            push_string_value(&mut paths, value_at_path(location, "uri"));
+        }
+    }
+    paths
+}
+
+fn push_string_value(out: &mut Vec<String>, value: Option<&Value>) {
+    if let Some(value) = value.and_then(Value::as_str) {
+        if !value.trim().is_empty() {
+            out.push(value.to_string());
+        }
     }
 }
 
@@ -314,13 +396,14 @@ fn evaluate_no_path_escape(
         );
     };
 
-    let sandbox = normalize_path_lexical(Path::new(sandbox_path));
+    let sandbox = path_util::canonicalize_existing(Path::new(sandbox_path))
+        .unwrap_or_else(|_| path_util::normalize_path_lexical(Path::new(sandbox_path)));
     let mut allowed_roots = vec![sandbox.clone()];
     if let Some(extra_roots) = allow_outside {
         allowed_roots.extend(
             extra_roots
                 .iter()
-                .map(|path| resolve_against_sandbox(&sandbox, path)),
+                .map(|path| resolve_allowed_root(&sandbox, path)),
         );
     }
 
@@ -330,12 +413,16 @@ fn evaluate_no_path_escape(
             continue;
         }
         for (field, raw_path) in tool_path_inputs(call) {
-            let resolved = resolve_against_sandbox(&sandbox, &raw_path);
-            if !allowed_roots
-                .iter()
-                .any(|root| path_is_within(&resolved, root))
-            {
-                violations.push(format!("{}.{field} -> {raw_path}", call.name));
+            match resolve_trace_path(&sandbox, &call.name, &raw_path) {
+                Ok(resolved) => {
+                    if !allowed_roots
+                        .iter()
+                        .any(|root| path_util::path_is_within(&resolved, root))
+                    {
+                        violations.push(format!("{}.{field} -> {raw_path}", call.name));
+                    }
+                }
+                Err(err) => violations.push(format!("{}.{field} -> {raw_path} ({err})", call.name)),
             }
         }
     }
@@ -359,52 +446,95 @@ fn evaluate_no_path_escape(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_tool_called(
     id: &str,
     weight: f64,
     tool: Option<&str>,
     tool_pattern: Option<&str>,
+    tool_kind: Option<&str>,
+    title_pattern: Option<&str>,
     expected_args: Option<&BTreeMap<String, String>>,
+    raw_input_match: Option<&BTreeMap<String, String>>,
     call_index: Option<usize>,
+    capture: Option<&[String]>,
+    capture_max_chars: Option<usize>,
     trace: &TraceRecord,
 ) -> AssertionResult {
-    let pattern = match tool_pattern {
-        Some(pattern) => match compile_pattern(pattern) {
-            Ok(pattern) => Some(pattern),
-            Err(err) => {
-                return base_result(
-                    id,
-                    "tool_called",
-                    false,
-                    weight,
-                    format!("invalid tool_pattern regex: {err}"),
-                )
-            }
-        },
-        None => None,
+    let matcher = match ToolCallMatcher::new(
+        tool,
+        tool_pattern,
+        tool_kind,
+        title_pattern,
+        expected_args,
+        raw_input_match,
+    ) {
+        Ok(matcher) => matcher,
+        Err(err) => return base_result(id, "tool_called", false, weight, err),
     };
     let matches = all_tool_calls(trace)
         .into_iter()
-        .filter(|call| {
-            let tool_ok = tool.is_some_and(|tool| call.name == tool)
-                || pattern.as_ref().is_some_and(|re| re.is_match(&call.name));
-            tool_ok && args_match(expected_args, &call.input).unwrap_or(false)
-        })
+        .filter(|call| matcher.matches(call))
         .collect::<Vec<_>>();
     let pass = call_index
         .map(|idx| matches.get(idx).is_some())
         .unwrap_or(!matches.is_empty());
-    base_result(
-        id,
-        "tool_called",
-        pass,
-        weight,
-        if pass {
-            format!("found `{}` call", tool.unwrap_or("<matching pattern>"))
-        } else {
-            format!("no `{}` call matched", tool.unwrap_or("<matching pattern>"))
-        },
+    let captures = call_index
+        .and_then(|idx| matches.get(idx).copied())
+        .or_else(|| matches.first().copied())
+        .filter(|_| pass)
+        .map(|call| capture_fields(&call.input, capture, capture_max_chars, None))
+        .unwrap_or_default();
+    with_captures(
+        base_result(
+            id,
+            "tool_called",
+            pass,
+            weight,
+            if pass {
+                format!("found {} call", matcher.description())
+            } else {
+                format!("no {} call matched", matcher.description())
+            },
+        ),
+        captures,
     )
+}
+
+fn capture_fields(
+    input: &Value,
+    fields: Option<&[String]>,
+    max_chars: Option<usize>,
+    step: Option<usize>,
+) -> Vec<CaptureRecord> {
+    let Some(fields) = fields else {
+        return Vec::new();
+    };
+    fields
+        .iter()
+        .map(|field| {
+            let raw = input.get(field).map(value_to_string).unwrap_or_default();
+            let original_length = raw.chars().count();
+            let (value, truncated) = match max_chars {
+                Some(max) if original_length > max => {
+                    (raw.chars().take(max).collect::<String>(), true)
+                }
+                _ => (raw, false),
+            };
+            CaptureRecord {
+                field: field.clone(),
+                value,
+                truncated,
+                original_length,
+                step,
+            }
+        })
+        .collect()
+}
+
+fn with_captures(mut result: AssertionResult, captures: Vec<CaptureRecord>) -> AssertionResult {
+    result.captures = captures;
+    result
 }
 
 fn evaluate_no_unanswered_questions(trace: &TraceRecord) -> AssertionResult {
@@ -441,18 +571,177 @@ fn evaluate_token_budget(trace: &TraceRecord) -> Option<AssertionResult> {
     ))
 }
 
-fn args_match(expected: Option<&BTreeMap<String, String>>, input: &Value) -> anyhow::Result<bool> {
-    let Some(expected) = expected else {
-        return Ok(true);
-    };
-    for (field, pattern) in expected {
-        let actual = input.get(field).map(value_to_string).unwrap_or_default();
-        let re = compile_pattern(pattern)?;
-        if !re.is_match(&actual) {
-            return Ok(false);
+#[derive(Debug)]
+struct FieldMatchRegexError {
+    matcher_name: &'static str,
+    field: String,
+    pattern: String,
+    error: String,
+}
+
+struct FieldMatcher<'a> {
+    patterns: Vec<(&'a str, regex::Regex)>,
+}
+
+impl<'a> FieldMatcher<'a> {
+    fn new(
+        expected: Option<&'a BTreeMap<String, String>>,
+        matcher_name: &'static str,
+    ) -> Result<Self, FieldMatchRegexError> {
+        let Some(expected) = expected else {
+            return Ok(Self {
+                patterns: Vec::new(),
+            });
+        };
+        let mut patterns = Vec::with_capacity(expected.len());
+        for (field, pattern) in expected {
+            let re = compile_pattern(pattern).map_err(|err| FieldMatchRegexError {
+                matcher_name,
+                field: field.clone(),
+                pattern: pattern.clone(),
+                error: err.to_string(),
+            })?;
+            patterns.push((field.as_str(), re));
         }
+        Ok(Self { patterns })
     }
-    Ok(true)
+
+    fn matches(&self, input: &Value) -> bool {
+        self.patterns.iter().all(|(field, re)| {
+            let actual = value_at_path(input, field)
+                .map(value_to_string)
+                .unwrap_or_default();
+            re.is_match(&actual)
+        })
+    }
+}
+
+struct ToolCallMatcher<'a> {
+    tool: Option<&'a str>,
+    tool_pattern: Option<regex::Regex>,
+    tool_kind: Option<&'a str>,
+    title_pattern: Option<regex::Regex>,
+    args_matcher: FieldMatcher<'a>,
+    raw_input_matcher: FieldMatcher<'a>,
+}
+
+impl<'a> ToolCallMatcher<'a> {
+    fn new(
+        tool: Option<&'a str>,
+        tool_pattern: Option<&'a str>,
+        tool_kind: Option<&'a str>,
+        title_pattern: Option<&'a str>,
+        args_match: Option<&'a BTreeMap<String, String>>,
+        raw_input_match: Option<&'a BTreeMap<String, String>>,
+    ) -> Result<Self, String> {
+        let tool_pattern = match tool_pattern {
+            Some(pattern) => Some(
+                compile_pattern(pattern)
+                    .map_err(|err| format!("invalid tool_pattern regex '{pattern}': {err}"))?,
+            ),
+            None => None,
+        };
+        let title_pattern = match title_pattern {
+            Some(pattern) => Some(
+                compile_pattern(pattern)
+                    .map_err(|err| format!("invalid title_pattern regex '{pattern}': {err}"))?,
+            ),
+            None => None,
+        };
+        let args_matcher =
+            FieldMatcher::new(args_match, "args_match").map_err(invalid_field_match_detail)?;
+        let raw_input_matcher = FieldMatcher::new(raw_input_match, "raw_input_match")
+            .map_err(invalid_field_match_detail)?;
+        Ok(Self {
+            tool,
+            tool_pattern,
+            tool_kind,
+            title_pattern,
+            args_matcher,
+            raw_input_matcher,
+        })
+    }
+
+    fn matches(&self, call: &ToolCallRecord) -> bool {
+        self.primary_selector_matches(call)
+            && self.title_matches(&call.input)
+            && self.args_matcher.matches(&call.input)
+            && self.raw_input_matcher.matches(raw_input_value(&call.input))
+    }
+
+    fn description(&self) -> String {
+        if let Some(tool) = self.tool {
+            return format!("`{tool}`");
+        }
+        if self.tool_pattern.is_some() {
+            return "`<matching pattern>`".to_string();
+        }
+        if let Some(tool_kind) = self.tool_kind {
+            return format!("ACP kind `{tool_kind}`");
+        }
+        "`<unspecified>`".to_string()
+    }
+
+    fn primary_selector_matches(&self, call: &ToolCallRecord) -> bool {
+        if let Some(tool) = self.tool {
+            return call.name == tool;
+        }
+        if let Some(pattern) = &self.tool_pattern {
+            return pattern.is_match(&call.name);
+        }
+        if let Some(tool_kind) = self.tool_kind {
+            return call.name == tool_kind
+                || value_at_path(&call.input, "_acpKind")
+                    .and_then(Value::as_str)
+                    .is_some_and(|actual| actual == tool_kind);
+        }
+        false
+    }
+
+    fn title_matches(&self, input: &Value) -> bool {
+        self.title_pattern.as_ref().is_none_or(|pattern| {
+            let actual = value_at_path(input, "_acpTitle")
+                .map(value_to_string)
+                .unwrap_or_default();
+            pattern.is_match(&actual)
+        })
+    }
+}
+
+fn invalid_field_match_detail(err: FieldMatchRegexError) -> String {
+    format!(
+        "invalid {} regex for '{}' ('{}'): {}",
+        err.matcher_name, err.field, err.pattern, err.error
+    )
+}
+
+fn value_at_path<'a>(input: &'a Value, path: &str) -> Option<&'a Value> {
+    if path.starts_with('/') {
+        return input.pointer(path);
+    }
+    if let Some(value) = input.get(path) {
+        return Some(value);
+    }
+    value_at_dot_path(input, path)
+}
+
+fn value_at_dot_path<'a>(input: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = input;
+    for segment in path.split('.') {
+        if segment.is_empty() {
+            return None;
+        }
+        current = match current {
+            Value::Object(object) => object.get(segment)?,
+            Value::Array(array) => array.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
+    }
+    Some(current)
+}
+
+fn raw_input_value(input: &Value) -> &Value {
+    input.get("rawInput").unwrap_or(input)
 }
 
 fn value_to_string(value: &Value) -> String {
@@ -493,17 +782,48 @@ fn tool_path_fields(tool: &str) -> &'static [&'static str] {
     match tool {
         "Read" | "Write" | "Edit" | "MultiEdit" | "NotebookRead" | "NotebookEdit" => &["file_path"],
         "Glob" | "Grep" | "LS" => &["path"],
+        "fs/read_text_file" | "fs/write_text_file" => &["path"],
+        "terminal/create" => &["cwd"],
         _ => &[],
     }
 }
 
-fn resolve_against_sandbox(sandbox: &Path, raw_path: &str) -> PathBuf {
+fn resolve_allowed_root(sandbox: &Path, raw_path: &str) -> PathBuf {
+    let expanded = expand_home(raw_path);
+    let candidate = path_util::candidate_path(sandbox, Path::new(&expanded));
+    path_util::canonicalize_existing(&candidate)
+        .unwrap_or_else(|_| path_util::normalize_path_lexical(&candidate))
+}
+
+fn resolve_trace_path(sandbox: &Path, tool: &str, raw_path: &str) -> anyhow::Result<PathBuf> {
     let expanded = expand_home(raw_path);
     let path = Path::new(&expanded);
-    if path.is_absolute() {
-        normalize_path_lexical(path)
-    } else {
-        normalize_path_lexical(&sandbox.join(path))
+    match tool {
+        "fs/write_text_file" => {
+            path_util::resolve_write_target_inside(sandbox, path).or_else(|err| {
+                if err.to_string().contains("escapes sandbox") {
+                    Err(err)
+                } else {
+                    Ok(path_util::normalize_path_lexical(
+                        &path_util::candidate_path(sandbox, path),
+                    ))
+                }
+            })
+        }
+        "fs/read_text_file" => path_util::resolve_existing_inside(sandbox, path).or_else(|err| {
+            if err.to_string().contains("escapes sandbox") {
+                Err(err)
+            } else {
+                Ok(path_util::normalize_path_lexical(
+                    &path_util::candidate_path(sandbox, path),
+                ))
+            }
+        }),
+        _ => {
+            let candidate = path_util::candidate_path(sandbox, path);
+            Ok(path_util::canonicalize_existing(&candidate)
+                .unwrap_or_else(|_| path_util::normalize_path_lexical(&candidate)))
+        }
     }
 }
 
@@ -521,47 +841,6 @@ fn home_dir_string() -> Option<String> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|value| value.to_string_lossy().to_string())
-}
-
-fn normalize_path_lexical(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push("..");
-                }
-            }
-            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
-            Component::RootDir => normalized.push(component.as_os_str()),
-            Component::Normal(part) => normalized.push(part),
-        }
-    }
-    normalized
-}
-
-fn path_is_within(path: &Path, root: &Path) -> bool {
-    let path_components = path_component_keys(path);
-    let root_components = path_component_keys(root);
-    path_components.len() >= root_components.len()
-        && path_components
-            .iter()
-            .zip(root_components.iter())
-            .all(|(path, root)| path == root)
-}
-
-fn path_component_keys(path: &Path) -> Vec<String> {
-    path.components()
-        .map(|component| {
-            let text = component.as_os_str().to_string_lossy().to_string();
-            if cfg!(windows) {
-                text.to_ascii_lowercase()
-            } else {
-                text
-            }
-        })
-        .collect()
 }
 
 fn base_result(id: &str, kind: &str, pass: bool, weight: f64, detail: String) -> AssertionResult {

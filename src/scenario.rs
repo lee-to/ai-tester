@@ -1,10 +1,12 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::config::McpServerConfig;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scenario {
@@ -21,6 +23,8 @@ pub struct Scenario {
     pub token_budget: Option<f64>,
     #[serde(default)]
     pub runner: Runner,
+    #[serde(default)]
+    pub mcp_servers: BTreeMap<String, McpServerConfig>,
     #[serde(default)]
     pub fixtures: Fixtures,
     #[serde(default)]
@@ -64,6 +68,20 @@ impl Scenario {
                 bail!("token_budget must be positive");
             }
         }
+        if self.fixtures.setup_timeout_seconds == Some(0) {
+            bail!("fixtures.setup_timeout_seconds must be positive");
+        }
+        if self.runner.acp_turn_timeout_seconds == Some(0) {
+            bail!("runner.acp_turn_timeout_seconds must be positive");
+        }
+        if !self.fixtures.git_init {
+            if self.fixtures.git_branch.is_some() {
+                bail!("fixtures.git_branch requires fixtures.git_init: true");
+            }
+            if !self.fixtures.files_staged.is_empty() {
+                bail!("fixtures.files_staged requires fixtures.git_init: true");
+            }
+        }
         for file in self
             .fixtures
             .files_committed
@@ -73,8 +91,20 @@ impl Scenario {
         {
             file.validate()?;
         }
-        for assertion in &self.assertions {
-            validate_assertion_shape(assertion)?;
+        let mut assertion_ids = BTreeSet::new();
+        for (index, assertion) in self.assertions.iter().enumerate() {
+            let id = assertion.id();
+            if id.trim().is_empty() {
+                bail!("assertions[{index}].id must not be empty");
+            }
+            if !assertion_ids.insert(id) {
+                bail!("assertions[].id must be unique: '{id}'");
+            }
+            let weight = assertion.weight();
+            if !weight.is_finite() || weight <= 0.0 {
+                bail!("assertions[{index}].weight must be finite and positive");
+            }
+            validate_assertion_shape(index, assertion)?;
         }
         Ok(())
     }
@@ -91,8 +121,11 @@ pub struct LoadedScenario {
 pub struct ScenarioSourceMeta {
     pub runner_runtime_set: bool,
     pub runner_model_set: bool,
+    pub runner_mode_set: bool,
+    pub runner_reasoning_set: bool,
     pub runner_permission_mode_set: bool,
     pub runner_agent_set: bool,
+    pub runner_mcp_profile_set: bool,
 }
 
 pub fn load_scenario_file(path: impl AsRef<Path>) -> anyhow::Result<LoadedScenario> {
@@ -118,11 +151,20 @@ fn scenario_source_meta(raw: &str) -> ScenarioSourceMeta {
         runner_model_set: runner
             .and_then(|runner| runner.get("model"))
             .is_some_and(|value| !value.is_null()),
+        runner_mode_set: runner
+            .and_then(|runner| runner.get("mode"))
+            .is_some_and(|value| !value.is_null()),
+        runner_reasoning_set: runner
+            .and_then(|runner| runner.get("reasoning"))
+            .is_some_and(|value| !value.is_null()),
         runner_permission_mode_set: runner
             .and_then(|runner| runner.get("permission_mode"))
             .is_some_and(|value| !value.is_null()),
         runner_agent_set: runner
             .and_then(|runner| runner.get("agent"))
+            .is_some_and(|value| !value.is_null()),
+        runner_mcp_profile_set: runner
+            .and_then(|runner| runner.get("mcp_profile"))
             .is_some_and(|value| !value.is_null()),
     }
 }
@@ -163,9 +205,13 @@ pub struct Runner {
     pub runtime: String,
     #[serde(default = "default_model")]
     pub model: String,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
     pub agent: Option<String>,
+    pub mcp_profile: Option<String>,
+    pub acp_turn_timeout_seconds: Option<u64>,
     pub allowed_tools_override: Option<Vec<String>>,
     pub setting_sources: Option<Vec<String>>,
 }
@@ -175,8 +221,12 @@ impl Default for Runner {
         Self {
             runtime: default_runtime(),
             model: default_model(),
+            mode: None,
+            reasoning: None,
             permission_mode: default_permission_mode(),
             agent: None,
+            mcp_profile: None,
+            acp_turn_timeout_seconds: None,
             allowed_tools_override: None,
             setting_sources: None,
         }
@@ -210,6 +260,7 @@ pub struct Fixtures {
     pub files_unstaged: Vec<FixtureFile>,
     #[serde(default)]
     pub setup_commands: Vec<String>,
+    pub setup_timeout_seconds: Option<u64>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
 }
@@ -256,7 +307,10 @@ pub enum AssertionSpec {
         weight: f64,
         tool: Option<String>,
         tool_pattern: Option<String>,
+        tool_kind: Option<String>,
+        title_pattern: Option<String>,
         args_match: Option<BTreeMap<String, String>>,
+        raw_input_match: Option<BTreeMap<String, String>>,
         call_index: Option<usize>,
         capture: Option<Vec<String>>,
         capture_max_chars: Option<usize>,
@@ -274,7 +328,10 @@ pub enum AssertionSpec {
         weight: f64,
         tool: Option<String>,
         tool_pattern: Option<String>,
+        tool_kind: Option<String>,
+        title_pattern: Option<String>,
         args_match: Option<BTreeMap<String, String>>,
+        raw_input_match: Option<BTreeMap<String, String>>,
     },
     OutputContains {
         id: String,
@@ -342,7 +399,10 @@ impl AssertionSpec {
             weight: 1.0,
             tool: Some(tool.to_string()),
             tool_pattern: None,
+            tool_kind: None,
+            title_pattern: None,
             args_match: json_object_to_regex_map(args_match),
+            raw_input_match: None,
             call_index: None,
             capture: None,
             capture_max_chars: None,
@@ -355,7 +415,10 @@ impl AssertionSpec {
             weight: 1.0,
             tool: Some(tool.to_string()),
             tool_pattern: None,
+            tool_kind: None,
+            title_pattern: None,
             args_match: None,
+            raw_input_match: None,
         }
     }
 
@@ -394,8 +457,11 @@ impl AssertionSpec {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SequenceStep {
-    pub tool: String,
+    pub tool: Option<String>,
+    pub tool_kind: Option<String>,
+    pub title_pattern: Option<String>,
     pub args_match: Option<BTreeMap<String, String>>,
+    pub raw_input_match: Option<BTreeMap<String, String>>,
     pub capture: Option<Vec<String>>,
 }
 
@@ -420,24 +486,52 @@ fn json_object_to_regex_map(value: Value) -> Option<BTreeMap<String, String>> {
     )
 }
 
-pub fn validate_assertion_shape(spec: &AssertionSpec) -> anyhow::Result<()> {
+pub fn validate_assertion_shape(index: usize, spec: &AssertionSpec) -> anyhow::Result<()> {
     match spec {
         AssertionSpec::ToolCalled {
-            tool, tool_pattern, ..
-        } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
-            "tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+            tool,
+            tool_pattern,
+            tool_kind,
+            ..
+        } if primary_selector_count(tool, tool_pattern, tool_kind) != 1 => Err(anyhow!(
+            "tool_called assertion must declare exactly one of `tool`, `tool_pattern`, or `tool_kind`"
         )),
         AssertionSpec::ToolCallSequence { sequence, .. } if sequence.is_empty() => Err(anyhow!(
             "tool_call_sequence assertion must declare at least one step"
         )),
+        AssertionSpec::ToolCallSequence { sequence, .. }
+            if sequence.iter().any(|step| {
+                step.tool.is_some() == step.tool_kind.is_some()
+            }) =>
+        {
+            Err(anyhow!(
+                "tool_call_sequence steps must declare exactly one of `tool` or `tool_kind`"
+            ))
+        }
         AssertionSpec::NoToolCalled {
-            tool, tool_pattern, ..
-        } if tool.is_some() == tool_pattern.is_some() => Err(anyhow!(
-            "no_tool_called assertion must declare exactly one of `tool` or `tool_pattern`"
+            tool,
+            tool_pattern,
+            tool_kind,
+            ..
+        } if primary_selector_count(tool, tool_pattern, tool_kind) != 1 => Err(anyhow!(
+            "no_tool_called assertion must declare exactly one of `tool`, `tool_pattern`, or `tool_kind`"
         )),
         AssertionSpec::FileRead { path, .. } if path.trim().is_empty() => Err(anyhow!(
             "file_read assertion must declare non-empty `path` regex"
         )),
+        AssertionSpec::TurnCountAtMost { max, .. } if *max == 0 => {
+            Err(anyhow!("assertions[{index}].max must be positive"))
+        }
         _ => Ok(()),
     }
+}
+
+fn primary_selector_count(
+    tool: &Option<String>,
+    tool_pattern: &Option<String>,
+    tool_kind: &Option<String>,
+) -> usize {
+    usize::from(tool.is_some())
+        + usize::from(tool_pattern.is_some())
+        + usize::from(tool_kind.is_some())
 }

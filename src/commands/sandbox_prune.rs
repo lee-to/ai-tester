@@ -189,3 +189,24 @@ fn human_age(age: Duration) -> String {
         format!("{}d", secs / 86_400)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collect_orphans_finds_ai_tester_prefixed_directories() {
+        let root = tempfile::TempDir::new().expect("temp root");
+        let orphan = root.path().join("ai-tester-kept-example");
+        let unrelated = root.path().join("not-ai-tester");
+        fs::create_dir_all(&orphan).expect("orphan dir");
+        fs::write(orphan.join("file.txt"), "kept").expect("orphan file");
+        fs::create_dir_all(unrelated).expect("unrelated dir");
+
+        let orphans = collect_orphans(root.path(), Duration::ZERO).expect("orphans collected");
+
+        assert_eq!(orphans.len(), 1);
+        assert_eq!(orphans[0].name, "ai-tester-kept-example");
+        assert_eq!(orphans[0].size_bytes, 4);
+    }
+}

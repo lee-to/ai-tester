@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use chrono::Utc;
 
-use crate::assertions::{compute_weighted_score, evaluate_assertions, AssertionResult};
+use crate::assertions::{
+    compute_weighted_score, evaluate_assertions, AssertionResult, CaptureRecord,
+};
 use crate::config::load_project_config;
 use crate::sandbox::{create_sandbox, SandboxOptions, SkillInstall};
 use crate::scenario::{load_scenario_file, LoadedScenario, Scenario};
@@ -32,17 +35,29 @@ pub struct RunOptions {
     pub file: Option<PathBuf>,
     pub dir: Option<PathBuf>,
     pub model: Option<String>,
+    pub mode: Option<String>,
+    pub reasoning: Option<String>,
     pub runtime: Option<String>,
     pub agent: Option<String>,
+    pub mcp_profile: Option<String>,
+    pub acp_log: Option<PathBuf>,
     pub filter: Option<String>,
     pub dry_run: bool,
     pub keep_sandbox: bool,
     pub quiet: bool,
     pub idle_warn_seconds: u64,
+    pub setup_timeout_seconds: Option<u64>,
+    pub acp_turn_timeout_seconds: Option<u64>,
     pub format: OutputFormat,
 }
 
 pub fn run_command(opts: RunOptions) -> anyhow::Result<i32> {
+    if opts.setup_timeout_seconds == Some(0) {
+        anyhow::bail!("setup timeout must be positive");
+    }
+    if opts.acp_turn_timeout_seconds == Some(0) {
+        anyhow::bail!("ACP turn timeout must be positive");
+    }
     if opts.dry_run {
         return run_dry_run(opts);
     }
@@ -65,7 +80,7 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
             }
         }
         Err(err) => {
-            println!(
+            eprintln!(
                 "{} scenario discovery failed: {err}",
                 ui::paint("x", Tone::Error)
             );
@@ -79,12 +94,12 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
     println!("  {}", ui::kv("invalid", invalid));
     println!();
     if invalid > 0 {
-        println!(
+        eprintln!(
             "{} {}",
             ui::status("FAIL", false),
             ui::paint("some scenarios failed to load", Tone::Muted)
         );
-        Ok(1)
+        Ok(2)
     } else {
         println!(
             "{} {}",
@@ -142,6 +157,9 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
         let config = load_project_config(std::env::current_dir()?)?;
+        let setup_timeout = effective_setup_timeout(&opts, &config, &scenario);
+        let acp_turn_timeout_seconds =
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario);
         let runtime_status = crate::runtime::runtime_status_for_scenario(&scenario, &config);
         if !runtime_status.ready {
             if !silent {
@@ -168,10 +186,26 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .runner
                 .agent
                 .as_deref()
-                .and_then(|name| config.acp_agents.get(name))
-                .cloned()
+                .map(|name| crate::config::resolve_acp_agent_for_run(&config, name))
+                .transpose()?
         } else {
             None
+        };
+        let mcp_servers = if runtime_name == "acp" {
+            crate::config::resolve_mcp_servers_for_run(
+                &config,
+                &scenario.mcp_servers,
+                scenario.runner.mcp_profile.as_deref(),
+                opts.mcp_profile.as_deref(),
+            )?
+            .servers
+        } else {
+            Vec::new()
+        };
+        let acp_config = if runtime_name == "acp" {
+            build_acp_config_request(&loaded, &opts, &config, &scenario)
+        } else {
+            crate::runtime::AcpConfigRequest::default()
         };
 
         if !silent {
@@ -180,11 +214,23 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
 
         let started_at = Utc::now();
         let start = Instant::now();
+        let acp_transcript = build_acp_transcript_config(
+            idx + 1,
+            &opts,
+            &runtime_name,
+            &skill,
+            &scenario,
+            started_at,
+            &acp_agent,
+            &mcp_servers,
+        )?;
+        let acp_transcript_for_error = acp_transcript.clone();
         let sandbox = create_sandbox(
             &scenario.scenario,
             &scenario.fixtures,
             SandboxOptions {
                 keep: opts.keep_sandbox,
+                setup_timeout,
                 skill: skill.install.as_ref().map(|install| SkillInstall {
                     name: install.name.clone(),
                     dir_path: install.dir_path.clone(),
@@ -227,16 +273,27 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
                 .map(|p| p.to_string_lossy().to_string()),
             progress: verbose,
             idle_warn_seconds: opts.idle_warn_seconds,
+            acp_turn_timeout_seconds,
+            scenario_env: scenario.fixtures.env.clone(),
             acp_agent_name: scenario.runner.agent.clone(),
             acp_agent,
+            mcp_servers,
+            acp_config,
+            acp_transcript,
         }) {
             Ok(result) => result,
             Err(err) => {
                 if !silent {
                     println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
                     println!("  {}{err}", ui::label("reason"));
+                    if let Some(transcript) = &acp_transcript_for_error {
+                        println!(
+                            "  {}{}",
+                            ui::label("ACP transcript"),
+                            transcript.path.display()
+                        );
+                    }
                 }
-                let _ = sandbox.cleanup();
                 runtime_errors += 1;
                 continue;
             }
@@ -312,6 +369,30 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     } else {
         Ok(2)
     }
+}
+
+fn effective_setup_timeout(
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> Duration {
+    let seconds = opts
+        .setup_timeout_seconds
+        .or(scenario.fixtures.setup_timeout_seconds)
+        .or(config.defaults.setup_timeout_seconds)
+        .unwrap_or(crate::config::DEFAULT_SETUP_TIMEOUT_SECONDS);
+    Duration::from_secs(seconds)
+}
+
+fn effective_acp_turn_timeout_seconds(
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> u64 {
+    opts.acp_turn_timeout_seconds
+        .or(scenario.runner.acp_turn_timeout_seconds)
+        .or(config.defaults.acp_turn_timeout_seconds)
+        .unwrap_or(crate::config::DEFAULT_ACP_TURN_TIMEOUT_SECONDS)
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -404,7 +485,8 @@ fn render_markdown(records: &[TraceRecord]) -> String {
 
     for record in records {
         let has_failed = record.assertions.iter().any(|a| !a.pass);
-        if !has_failed && record.errors.is_empty() {
+        let has_captures = record.assertions.iter().any(|a| !a.captures.is_empty());
+        if !has_failed && record.errors.is_empty() && !has_captures {
             continue;
         }
         out.push_str(&format!("## {}\n\n", record.scenario.name));
@@ -413,6 +495,20 @@ fn render_markdown(records: &[TraceRecord]) -> String {
                 "- ❌ **{}**: {}\n",
                 assertion.id, assertion.detail
             ));
+        }
+        for assertion in record
+            .assertions
+            .iter()
+            .filter(|assertion| !assertion.captures.is_empty())
+        {
+            for capture in &assertion.captures {
+                out.push_str(&format!(
+                    "- 📎 **{}** {}: {}\n",
+                    assertion.id,
+                    format_capture_field(capture),
+                    format_capture_value(capture),
+                ));
+            }
         }
         for error in &record.errors {
             out.push_str(&format!("- ⚠️ **{}**: {}\n", error.kind, error.message));
@@ -568,6 +664,16 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
             scenario.runner.model = model;
         }
     }
+    if !loaded.source_meta.runner_mode_set {
+        if let Some(mode) = config.defaults.mode {
+            scenario.runner.mode = Some(mode);
+        }
+    }
+    if !loaded.source_meta.runner_reasoning_set {
+        if let Some(reasoning) = config.defaults.reasoning {
+            scenario.runner.reasoning = Some(reasoning);
+        }
+    }
     if !loaded.source_meta.runner_permission_mode_set {
         if let Some(permission_mode) = config.defaults.permission_mode {
             scenario.runner.permission_mode = permission_mode;
@@ -575,6 +681,12 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
     }
     if let Some(model) = opts.model.clone() {
         scenario.runner.model = model;
+    }
+    if let Some(mode) = opts.mode.clone() {
+        scenario.runner.mode = Some(mode);
+    }
+    if let Some(reasoning) = opts.reasoning.clone() {
+        scenario.runner.reasoning = Some(reasoning);
     }
     if let Some(runtime) = opts.runtime.clone() {
         scenario.runner.runtime = runtime;
@@ -587,7 +699,123 @@ fn prepare_scenario(loaded: &LoadedScenario, opts: &RunOptions) -> anyhow::Resul
     if let Some(agent) = opts.agent.clone() {
         scenario.runner.agent = Some(agent);
     }
+    if !loaded.source_meta.runner_mcp_profile_set {
+        if let Some(mcp_profile) = config.defaults.mcp_profile {
+            scenario.runner.mcp_profile = Some(mcp_profile);
+        }
+    }
+    if let Some(mcp_profile) = opts.mcp_profile.clone() {
+        scenario.runner.mcp_profile = Some(mcp_profile);
+    }
     Ok(scenario)
+}
+
+fn build_acp_config_request(
+    loaded: &LoadedScenario,
+    opts: &RunOptions,
+    config: &crate::config::ProjectConfig,
+    scenario: &Scenario,
+) -> crate::runtime::AcpConfigRequest {
+    let model_requested = opts.model.is_some()
+        || loaded.source_meta.runner_model_set
+        || config.defaults.model.is_some();
+    let mode_requested =
+        opts.mode.is_some() || loaded.source_meta.runner_mode_set || config.defaults.mode.is_some();
+    let reasoning_requested = opts.reasoning.is_some()
+        || loaded.source_meta.runner_reasoning_set
+        || config.defaults.reasoning.is_some();
+
+    crate::runtime::AcpConfigRequest {
+        model: model_requested.then(|| scenario.runner.model.clone()),
+        mode: mode_requested
+            .then(|| scenario.runner.mode.clone())
+            .flatten(),
+        reasoning: reasoning_requested
+            .then(|| scenario.runner.reasoning.clone())
+            .flatten(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_acp_transcript_config(
+    index: usize,
+    opts: &RunOptions,
+    runtime_name: &str,
+    skill: &ResolvedSkill,
+    scenario: &Scenario,
+    started_at: chrono::DateTime<Utc>,
+    acp_agent: &Option<crate::config::ResolvedAcpAgent>,
+    mcp_servers: &[crate::config::NamedMcpServerConfig],
+) -> anyhow::Result<Option<crate::runtime::AcpTranscriptConfig>> {
+    if runtime_name != "acp" {
+        return Ok(None);
+    }
+    let Some(log_dir) = &opts.acp_log else {
+        return Ok(None);
+    };
+    let log_dir = if log_dir.is_absolute() {
+        log_dir.clone()
+    } else {
+        std::env::current_dir()?.join(log_dir)
+    };
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("create ACP log dir {}", log_dir.display()))?;
+    let file_name = format!(
+        "{index:03}-{}__{}__{}__{}.acp.jsonl",
+        crate::trace::sanitize_path_segment(&skill.name),
+        crate::trace::sanitize_path_segment(&scenario.scenario),
+        started_at.format("%Y-%m-%dT%H-%M-%SZ"),
+        &skill.source_hash[..8]
+    );
+    Ok(Some(crate::runtime::AcpTranscriptConfig {
+        path: log_dir.join(file_name),
+        redaction_values: collect_acp_redaction_values(
+            acp_agent,
+            &scenario.fixtures.env,
+            mcp_servers,
+        ),
+    }))
+}
+
+fn collect_acp_redaction_values(
+    acp_agent: &Option<crate::config::ResolvedAcpAgent>,
+    scenario_env: &std::collections::BTreeMap<String, String>,
+    mcp_servers: &[crate::config::NamedMcpServerConfig],
+) -> Vec<String> {
+    let mut values = Vec::new();
+    values.extend(
+        scenario_env
+            .values()
+            .filter(|value| !value.is_empty())
+            .cloned(),
+    );
+    if let Some(env) = acp_agent
+        .as_ref()
+        .and_then(crate::config::ResolvedAcpAgent::configured_env)
+    {
+        values.extend(env.values().filter(|value| !value.is_empty()).cloned());
+    }
+    for server in mcp_servers {
+        values.extend(
+            server
+                .config
+                .env
+                .values()
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        );
+        values.extend(
+            server
+                .config
+                .headers
+                .values()
+                .filter(|value| !value.is_empty())
+                .cloned(),
+        );
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn list_skill_names(skills_dir: &Path) -> anyhow::Result<Vec<String>> {
@@ -614,6 +842,12 @@ fn print_run_banner(total: usize, opts: &RunOptions) {
     }
     if let Some(agent) = &opts.agent {
         println!("  {}", ui::kv("agent", ui::paint(agent, Tone::Info)));
+    }
+    if let Some(mcp_profile) = &opts.mcp_profile {
+        println!(
+            "  {}",
+            ui::kv("mcp profile", ui::paint(mcp_profile, Tone::Info))
+        );
     }
     if let Some(model) = &opts.model {
         println!("  {}", ui::kv("model", ui::paint(model, Tone::Info)));
@@ -685,6 +919,9 @@ fn print_scenario_dry_run(loaded: &LoadedScenario, scenario: &Scenario) {
     println!("    {}", ui::kv("runtime", &scenario.runner.runtime));
     if let Some(agent) = &scenario.runner.agent {
         println!("    {}", ui::kv("agent", agent));
+    }
+    if let Some(mcp_profile) = &scenario.runner.mcp_profile {
+        println!("    {}", ui::kv("mcp profile", mcp_profile));
     }
     println!("    {}", ui::kv("model", &scenario.runner.model));
     println!(
@@ -934,6 +1171,8 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
         runner: TraceRunner {
             runtime: scenario.runner.runtime.clone(),
             model: scenario.runner.model.clone(),
+            mode: scenario.runner.mode.clone(),
+            reasoning: scenario.runner.reasoning.clone(),
             permission_mode: scenario.runner.permission_mode.clone(),
             started_at,
             finished_at,
@@ -942,6 +1181,7 @@ fn build_trace_record(input: TraceBuildInput<'_>) -> TraceRecord {
             max_turns_user_set: runtime_result.max_turns_user_set,
             turns_used: runtime_result.turns_used,
             hit_max_turns,
+            stopped_reason: runtime_result.stopped_reason,
             session_id: runtime_result.session_id,
             sandbox_path,
         },
@@ -1018,6 +1258,7 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
                 ui::paint(&assertion.id, Tone::Strong),
                 ui::paint(&assertion.detail, Tone::Muted)
             );
+            print_assertion_captures(assertion, "      ", true);
         }
     } else if !record.assertions.is_empty() {
         let passed = record
@@ -1049,6 +1290,7 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
                 );
             }
         }
+        print_record_captures(record);
     }
 
     for error in &record.errors {
@@ -1058,6 +1300,60 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
             ui::paint(&error.kind, Tone::Error),
             error.message
         );
+    }
+}
+
+fn print_record_captures(record: &TraceRecord) {
+    let captured = record
+        .assertions
+        .iter()
+        .filter(|assertion| !assertion.captures.is_empty())
+        .collect::<Vec<_>>();
+    if captured.is_empty() {
+        return;
+    }
+    println!("  {}", ui::section("Captures"));
+    for assertion in captured {
+        print_assertion_captures(assertion, "    ", false);
+    }
+}
+
+fn print_assertion_captures(assertion: &AssertionResult, indent: &str, include_heading: bool) {
+    if assertion.captures.is_empty() {
+        return;
+    }
+    if include_heading {
+        println!("{indent}{}", ui::section("Captures"));
+    }
+    for capture in &assertion.captures {
+        println!(
+            "{indent}  {} {} {}",
+            ui::paint("●", Tone::Info),
+            ui::paint(&assertion.id, Tone::Strong),
+            ui::paint(
+                &format!(
+                    "{}: {}",
+                    format_capture_field(capture),
+                    format_capture_value(capture)
+                ),
+                Tone::Muted,
+            )
+        );
+    }
+}
+
+fn format_capture_field(capture: &CaptureRecord) -> String {
+    match capture.step {
+        Some(step) => format!("{}[step {step}]", capture.field),
+        None => capture.field.clone(),
+    }
+}
+
+fn format_capture_value(capture: &CaptureRecord) -> String {
+    if capture.truncated {
+        format!("{} <truncated>", capture.value)
+    } else {
+        capture.value.clone()
     }
 }
 
@@ -1097,6 +1393,7 @@ fn format_score(score: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assertions::CaptureRecord;
     use crate::trace::{TraceError, TraceRecord};
 
     fn passing_record(name: &str) -> TraceRecord {
@@ -1123,6 +1420,28 @@ mod tests {
         record
     }
 
+    fn captured_record(name: &str) -> TraceRecord {
+        let mut record = passing_record(name);
+        record.assertions.push(AssertionResult {
+            id: "calls-status".to_string(),
+            kind: "tool_called".to_string(),
+            pass: true,
+            detail: "found `Bash` call".to_string(),
+            weight: 1.0,
+            score: None,
+            min_score: None,
+            rationale: None,
+            captures: vec![CaptureRecord {
+                field: "command".to_string(),
+                value: "git status --short".to_string(),
+                truncated: false,
+                original_length: 18,
+                step: None,
+            }],
+        });
+        record
+    }
+
     fn errored_record(name: &str) -> TraceRecord {
         let mut record = passing_record(name);
         record.errors.push(TraceError {
@@ -1130,6 +1449,60 @@ mod tests {
             message: "boom".to_string(),
         });
         record
+    }
+
+    fn project_config_with_acp_turn_timeout(timeout: Option<u64>) -> crate::config::ProjectConfig {
+        crate::config::ProjectConfig {
+            root_dir: PathBuf::new(),
+            config_path: None,
+            skills_dir: PathBuf::from("skills"),
+            runs_dir: PathBuf::from("runs"),
+            defaults: crate::config::ProjectDefaults {
+                acp_turn_timeout_seconds: timeout,
+                ..Default::default()
+            },
+            acp_agents: Default::default(),
+            mcp_servers: Default::default(),
+            mcp_profiles: Default::default(),
+        }
+    }
+
+    #[test]
+    fn acp_turn_timeout_precedence_is_cli_scenario_project_default() {
+        let config = project_config_with_acp_turn_timeout(Some(30));
+        let scenario = Scenario::from_yaml_str(
+            "scenario: acp-timeout\nsystem_prompt: Body\nrunner:\n  runtime: acp\n  acp_turn_timeout_seconds: 20\n",
+        )
+        .expect("scenario parses");
+        let opts = RunOptions {
+            acp_turn_timeout_seconds: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            10
+        );
+
+        let opts = RunOptions::default();
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            20
+        );
+
+        let scenario = Scenario::from_yaml_str(
+            "scenario: acp-timeout\nsystem_prompt: Body\nrunner:\n  runtime: acp\n",
+        )
+        .expect("scenario parses");
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            30
+        );
+
+        let config = project_config_with_acp_turn_timeout(None);
+        assert_eq!(
+            effective_acp_turn_timeout_seconds(&opts, &config, &scenario),
+            crate::config::DEFAULT_ACP_TURN_TIMEOUT_SECONDS
+        );
     }
 
     #[test]
@@ -1179,6 +1552,18 @@ mod tests {
         assert!(md.contains("## beta"));
         assert!(!md.contains("## alpha"));
         assert!(md.contains("missing expected text"));
+    }
+
+    #[test]
+    fn markdown_reports_capture_detail_for_passing_scenario() {
+        let records = vec![captured_record("alpha")];
+        let md = render_markdown(&records);
+
+        assert!(md.contains("**PASS**"));
+        assert!(md.contains("## alpha"));
+        assert!(md.contains("calls-status"));
+        assert!(md.contains("command"));
+        assert!(md.contains("git status --short"));
     }
 
     #[test]
