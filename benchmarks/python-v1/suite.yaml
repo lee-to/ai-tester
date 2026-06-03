@@ -1,0 +1,40 @@
+suite: python-v1
+version: 1
+description: Python stdlib benchmark for config-driven maintenance tasks.
+requirements:
+  commands:
+    - python3 --version
+scoring:
+  correctness_weight: 0.8
+  efficiency_weight: 0.2
+scenarios:
+  - file: tasks/01-layered-settings.yaml
+    weight: 1
+    time_budget_ms: 35000
+    token_budget: 260000
+    tool_budget: 8
+  - file: tasks/02-access-rules.yaml
+    weight: 1
+    time_budget_ms: 35000
+    token_budget: 260000
+    tool_budget: 8
+  - file: tasks/03-data-mapping.yaml
+    weight: 1
+    time_budget_ms: 60000
+    token_budget: 320000
+    tool_budget: 9
+  - file: tasks/04-release-notes.yaml
+    weight: 1.5
+    time_budget_ms: 50000
+    token_budget: 330000
+    tool_budget: 9
+  - file: tasks/05-schema-validation.yaml
+    weight: 1.5
+    time_budget_ms: 45000
+    token_budget: 330000
+    tool_budget: 9
+  - file: tasks/06-misleading-debug.yaml
+    weight: 2
+    time_budget_ms: 90000
+    token_budget: 360000
+    tool_budget: 12

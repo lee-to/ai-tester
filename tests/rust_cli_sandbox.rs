@@ -1059,7 +1059,7 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
     fs::create_dir_all(&bin_dir).expect("bin dir");
     write_fake_acp_client_capabilities(&bin_dir);
     let terminal_marker = tmp.path().join("terminal-descendant.marker");
-    let idle_warn = if cfg!(windows) { "5" } else { "1" };
+    let idle_warn = "5";
     fs::write(
         tmp.path().join(".ai-tester.yaml"),
         format!(

@@ -86,6 +86,10 @@ ai-tester run --file ./scenario.yaml --runtime codex
 
 # 5. Run standalone scenarios from a directory
 ai-tester run --dir ./prompts --runtime codex
+
+# Run deterministic benchmark packs
+ai-tester benchmark --suite benchmarks/js-v1/suite.yaml --runtime codex --model gpt-5-codex
+ai-tester benchmark --suite benchmarks/python-v1/suite.yaml --runtime acp --agent gemini --format json
 ```
 
 ## Project Config
@@ -177,6 +181,8 @@ ai-tester trace <run-id>
 ai-tester trace <run-id> --json
 ai-tester compare <run-a> <run-b>
 ai-tester compare <run-a> <run-b> --json
+ai-tester benchmark --suite benchmarks/js-v1/suite.yaml --runtime codex
+ai-tester benchmark --suite benchmarks/python-v1/suite.yaml --runtime codex --format markdown
 
 # Runtime and housekeeping
 ai-tester runtimes
@@ -210,6 +216,44 @@ Traces are still written to the `runs/` directory and exit codes are unchanged
 ai-tester run <skill> --format json > report.json
 ai-tester run <skill> --format markdown > report.md
 ```
+
+### `benchmark`
+
+`benchmark` runs a suite manifest, executes each listed scenario through the
+normal `run` pipeline, and computes a deterministic `0..100` score. The score is
+based on assertion correctness first, then efficiency from wall-clock time,
+token usage, and tool-call count. Failed `no_path_escape` assertions force a
+scenario score of `0`; failed `no_tool_called` assertions cap the scenario at
+`40`.
+
+```bash
+ai-tester benchmark --suite benchmarks/js-v1/suite.yaml --runtime codex --model gpt-5-codex
+ai-tester benchmark --suite benchmarks/python-v1/suite.yaml --runtime acp --agent gemini --format json
+```
+
+Suite manifests are YAML:
+
+```yaml
+suite: js-v1
+version: 1
+requirements:
+  commands:
+    - node --version
+scoring:
+  correctness_weight: 0.8
+  efficiency_weight: 0.2
+scenarios:
+  - file: tasks/01-config-precedence.yaml
+    weight: 1
+    time_budget_ms: 90000
+    token_budget: 12000
+    tool_budget: 25
+```
+
+The repository includes optional `js-v1` and `python-v1` packs under
+`benchmarks/`. They use only `node` or `python3` plus standard libraries, so the
+benchmark does not depend on network package installation. If a required command
+is missing, the suite is reported as skipped.
 
 ### `sandbox-prune`
 
@@ -496,8 +540,69 @@ an empty string, so `^$` matches an absent field and non-empty regexes do not.
 ```yaml
 - id: no-warning
   type: no_output_contains
-  pattern: "WARN \\[\\+check\\]"
+pattern: "WARN \\[\\+check\\]"
 ```
+
+### `file_contains` / `file_not_contains`
+
+```yaml
+- id: merge-updated
+  type: file_contains
+  path: merge.js
+  pattern: "mergeConfig"
+
+- id: no-secret
+  type: file_not_contains
+  path: output.txt
+  pattern: "secret"
+```
+
+### `file_equals` / `file_exists` / `file_not_exists`
+
+```yaml
+- id: exact-output
+  type: file_equals
+  path: result.json
+  content: "{\"ok\":true}\n"
+
+- id: artifact-exists
+  type: file_exists
+  path: result.json
+```
+
+### `json_valid` / `json_path_equals`
+
+```yaml
+- id: config-valid
+  type: json_valid
+  path: config.json
+
+- id: feature-enabled
+  type: json_path_equals
+  path: config.json
+  json_path: feature.enabled
+  value: true
+```
+
+`json_path` accepts the same dot-path and JSON Pointer forms as tool argument
+matchers.
+
+### `command_succeeds` / `command_output_contains`
+
+```yaml
+- id: tests-pass
+  type: command_succeeds
+  command: node test.js
+  timeout_seconds: 10
+
+- id: prints-ok
+  type: command_output_contains
+  command: python3 test.py
+  pattern: "\\bok\\b"
+```
+
+Commands run inside the scenario sandbox after the model finishes and before the
+sandbox is cleaned up. They default to a 30 second timeout.
 
 ### `file_read`
 

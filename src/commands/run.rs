@@ -113,12 +113,39 @@ fn run_dry_run(opts: RunOptions) -> anyhow::Result<i32> {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RunExecution {
+    pub passed: usize,
+    pub failed: usize,
+    pub runtime_errors: usize,
+    pub records: Vec<TraceRecord>,
+}
+
+impl RunExecution {
+    pub fn exit_code(&self) -> i32 {
+        if self.failed == 0 && self.runtime_errors == 0 {
+            0
+        } else if self.runtime_errors == 0 {
+            1
+        } else {
+            2
+        }
+    }
+}
+
+pub fn collect_run_records(opts: RunOptions) -> anyhow::Result<RunExecution> {
+    execute_runs(&opts, true)
+}
+
+pub fn collect_run_records_with_output(
+    opts: RunOptions,
+    silent: bool,
+) -> anyhow::Result<RunExecution> {
+    execute_runs(&opts, silent)
+}
+
 fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
-    // Non-live formats suppress banners, live progress and per-scenario output;
-    // results are buffered and rendered once at the end.
     let silent = opts.format != OutputFormat::Live;
-    let verbose = !opts.quiet && !silent;
-    let runs_dir = load_project_config(std::env::current_dir()?)?.runs_dir;
     let scenarios = discover_scenarios(&opts)?;
     if scenarios.is_empty() {
         match opts.format {
@@ -135,6 +162,44 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         }
         return Ok(0);
     }
+    let execution = execute_scenarios(&opts, scenarios, silent)?;
+
+    match opts.format {
+        OutputFormat::Json => println!("{}", render_json(&execution.records)?),
+        OutputFormat::Markdown => println!("{}", render_markdown(&execution.records)),
+        OutputFormat::Live => {
+            print_run_summary(execution.passed, execution.failed, execution.runtime_errors);
+            if execution.failed == 0 && execution.runtime_errors == 0 {
+                println!(
+                    "{} {}",
+                    ui::paint("●", Tone::Success),
+                    ui::status("PASS", true)
+                );
+            } else {
+                println!(
+                    "{} {}",
+                    ui::paint("●", Tone::Error),
+                    ui::status("FAIL", false)
+                );
+            }
+        }
+    }
+
+    Ok(execution.exit_code())
+}
+
+fn execute_runs(opts: &RunOptions, silent: bool) -> anyhow::Result<RunExecution> {
+    let scenarios = discover_scenarios(opts)?;
+    execute_scenarios(opts, scenarios, silent)
+}
+
+fn execute_scenarios(
+    opts: &RunOptions,
+    scenarios: Vec<LoadedScenario>,
+    silent: bool,
+) -> anyhow::Result<RunExecution> {
+    let verbose = !opts.quiet && !silent;
+    let runs_dir = load_project_config(std::env::current_dir()?)?.runs_dir;
     let total = scenarios.len();
 
     let mut passed = 0usize;
@@ -143,11 +208,11 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
     let mut records: Vec<TraceRecord> = Vec::new();
 
     if !silent {
-        print_run_banner(total, &opts);
+        print_run_banner(total, opts);
     }
 
     for (idx, loaded) in scenarios.into_iter().enumerate() {
-        let scenario = prepare_scenario(&loaded, &opts)?;
+        let scenario = prepare_scenario(&loaded, opts)?;
 
         let skill = resolve_skill(&loaded, &scenario)?;
         let allowed_tools = scenario
@@ -157,9 +222,8 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             .unwrap_or_else(|| skill.allowed_tools_raw.clone());
         let runtime_name = scenario.runner.runtime.clone();
         let config = load_project_config(std::env::current_dir()?)?;
-        let setup_timeout = effective_setup_timeout(&opts, &config, &scenario);
-        let acp_turn_timeout_seconds =
-            effective_acp_turn_timeout_seconds(&opts, &config, &scenario);
+        let setup_timeout = effective_setup_timeout(opts, &config, &scenario);
+        let acp_turn_timeout_seconds = effective_acp_turn_timeout_seconds(opts, &config, &scenario);
         let runtime_status = crate::runtime::runtime_status_for_scenario(&scenario, &config);
         if !runtime_status.ready {
             if !silent {
@@ -203,7 +267,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
             Vec::new()
         };
         let acp_config = if runtime_name == "acp" {
-            build_acp_config_request(&loaded, &opts, &config, &scenario)
+            build_acp_config_request(&loaded, opts, &config, &scenario)
         } else {
             crate::runtime::AcpConfigRequest::default()
         };
@@ -216,7 +280,7 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         let start = Instant::now();
         let acp_transcript = build_acp_transcript_config(
             idx + 1,
-            &opts,
+            opts,
             &runtime_name,
             &skill,
             &scenario,
@@ -341,34 +405,12 @@ fn run_live(opts: RunOptions) -> anyhow::Result<i32> {
         records.push(record);
     }
 
-    match opts.format {
-        OutputFormat::Json => println!("{}", render_json(&records)?),
-        OutputFormat::Markdown => println!("{}", render_markdown(&records)),
-        OutputFormat::Live => {
-            print_run_summary(passed, failed, runtime_errors);
-            if failed == 0 && runtime_errors == 0 {
-                println!(
-                    "{} {}",
-                    ui::paint("●", Tone::Success),
-                    ui::status("PASS", true)
-                );
-            } else {
-                println!(
-                    "{} {}",
-                    ui::paint("●", Tone::Error),
-                    ui::status("FAIL", false)
-                );
-            }
-        }
-    }
-
-    if failed == 0 && runtime_errors == 0 {
-        Ok(0)
-    } else if runtime_errors == 0 {
-        Ok(1)
-    } else {
-        Ok(2)
-    }
+    Ok(RunExecution {
+        passed,
+        failed,
+        runtime_errors,
+        records,
+    })
 }
 
 fn effective_setup_timeout(

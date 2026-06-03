@@ -1,0 +1,75 @@
+scenario: js-config-precedence
+system_prompt: |
+  You are fixing a small JavaScript project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix the config merge behavior. The intended precedence is local > project >
+  defaults. Object values deep-merge, arrays under "plugins" merge without
+  duplicates, and null explicitly disables a value.
+max_turns: 8
+fixtures:
+  git_init: true
+  files_committed:
+    - path: merge.js
+      content: |
+        function mergeConfig(defaults, project, local) {
+          return Object.assign({}, defaults, project, local);
+        }
+
+        module.exports = { mergeConfig };
+    - path: defaults.json
+      content: |
+        {
+          "theme": "light",
+          "retries": 2,
+          "features": { "audit": false, "export": false },
+          "plugins": ["core", "audit"],
+          "endpoint": "https://example.test"
+        }
+    - path: project.json
+      content: |
+        {
+          "retries": 4,
+          "features": { "audit": true },
+          "plugins": ["audit", "billing"]
+        }
+    - path: local.json
+      content: |
+        {
+          "endpoint": null,
+          "features": { "export": true },
+          "plugins": ["local", "core"]
+        }
+    - path: test.js
+      content: |
+        const assert = require("assert");
+        const fs = require("fs");
+        const { mergeConfig } = require("./merge");
+
+        const read = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
+        const merged = mergeConfig(read("defaults.json"), read("project.json"), read("local.json"));
+
+        assert.equal(merged.theme, "light");
+        assert.equal(merged.retries, 4);
+        assert.deepEqual(merged.features, { audit: true, export: true });
+        assert.deepEqual(merged.plugins, ["core", "audit", "billing", "local"]);
+        assert.equal(merged.endpoint, null);
+        console.log("ok");
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: node test.js
+    timeout_seconds: 10
+    weight: 8
+  - id: merge-file-updated
+    type: file_contains
+    path: merge.js
+    pattern: "mergeConfig"
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: stay-in-sandbox
+    type: no_path_escape
+  - id: efficient-turns
+    type: turn_count_at_most
+    max: 8

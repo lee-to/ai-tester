@@ -1,0 +1,89 @@
+scenario: js-route-rewrites
+system_prompt: |
+  You are fixing a small JavaScript project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix route rewrite matching. Exact routes must beat parameter routes, parameter
+  routes must beat wildcards, query strings must be preserved, and trailing
+  slash behavior must be stable.
+max_turns: 8
+fixtures:
+  git_init: true
+  files_committed:
+    - path: routes.json
+      content: |
+        [
+          { "from": "/docs/*", "to": "/legacy-docs/*", "status": 302 },
+          { "from": "/docs/:slug", "to": "/knowledge/:slug", "status": 301 },
+          { "from": "/docs/index", "to": "/knowledge/home", "status": 301 }
+        ]
+    - path: router.js
+      content: |
+        function rewrite(routes, url) {
+          for (const route of routes) {
+            const match = matchRoute(route.from, url);
+            if (match) {
+              return { status: route.status, location: apply(route.to, match) };
+            }
+          }
+          return null;
+        }
+
+        function matchRoute(pattern, url) {
+          const path = url.split("?")[0];
+          if (pattern.endsWith("*") && path.startsWith(pattern.slice(0, -1))) {
+            return { "*": path.slice(pattern.length - 1) };
+          }
+          const parts = pattern.split("/");
+          const actual = path.split("/");
+          if (parts.length !== actual.length) return null;
+          const params = {};
+          for (let i = 0; i < parts.length; i++) {
+            if (parts[i].startsWith(":")) params[parts[i].slice(1)] = actual[i];
+            else if (parts[i] !== actual[i]) return null;
+          }
+          return params;
+        }
+
+        function apply(target, params) {
+          return Object.entries(params).reduce((out, [key, value]) => out.replace(":" + key, value).replace("*", value), target);
+        }
+
+        module.exports = { rewrite };
+    - path: test.js
+      content: |
+        const assert = require("assert");
+        const routes = require("./routes.json");
+        const { rewrite } = require("./router");
+
+        assert.deepEqual(rewrite(routes, "/docs/index?ref=top"), {
+          status: 301,
+          location: "/knowledge/home?ref=top"
+        });
+        assert.deepEqual(rewrite(routes, "/docs/install/"), {
+          status: 301,
+          location: "/knowledge/install/"
+        });
+        assert.deepEqual(rewrite(routes, "/docs/archive/v1?x=1"), {
+          status: 302,
+          location: "/legacy-docs/archive/v1?x=1"
+        });
+        assert.equal(rewrite(routes, "/blog/index"), null);
+        console.log("ok");
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: node test.js
+    timeout_seconds: 10
+    weight: 8
+  - id: routes-still-json
+    type: json_valid
+    path: routes.json
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: stay-in-sandbox
+    type: no_path_escape
+  - id: efficient-turns
+    type: turn_count_at_most
+    max: 8

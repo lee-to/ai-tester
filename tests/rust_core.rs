@@ -806,6 +806,80 @@ fn assertions_evaluate_tool_calls_output_turns_and_token_budget() {
 }
 
 #[test]
+fn assertions_evaluate_sandbox_files_json_and_commands() {
+    let tmp = TempDir::new().expect("temp dir");
+    fs::write(tmp.path().join("result.txt"), "status=done\n").expect("result written");
+    fs::write(
+        tmp.path().join("config.json"),
+        r#"{"feature":{"enabled":true},"plugins":["core","audit"]}"#,
+    )
+    .expect("json written");
+
+    let mut trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+    trace.runner.sandbox_path = Some(tmp.path().display().to_string());
+    let command = if cfg!(windows) {
+        "echo ok"
+    } else {
+        "printf ok"
+    };
+    let assertions = vec![
+        AssertionSpec::FileContains {
+            id: "file-has-status".to_string(),
+            weight: 1.0,
+            path: "result.txt".to_string(),
+            pattern: "status=done".to_string(),
+        },
+        AssertionSpec::FileNotContains {
+            id: "file-no-secret".to_string(),
+            weight: 1.0,
+            path: "result.txt".to_string(),
+            pattern: "secret".to_string(),
+        },
+        AssertionSpec::JsonValid {
+            id: "json-valid".to_string(),
+            weight: 1.0,
+            path: "config.json".to_string(),
+        },
+        AssertionSpec::JsonPathEquals {
+            id: "json-path".to_string(),
+            weight: 1.0,
+            path: "config.json".to_string(),
+            json_path: "feature.enabled".to_string(),
+            value: serde_json::json!(true),
+        },
+        AssertionSpec::FileNotExists {
+            id: "no-extra-file".to_string(),
+            weight: 1.0,
+            path: "extra.txt".to_string(),
+        },
+        AssertionSpec::CommandOutputContains {
+            id: "command-output".to_string(),
+            weight: 1.0,
+            command: command.to_string(),
+            pattern: "ok".to_string(),
+            timeout_seconds: Some(5),
+        },
+    ];
+
+    let results = evaluate_assertions(&assertions, &trace);
+    for id in [
+        "file-has-status",
+        "file-no-secret",
+        "json-valid",
+        "json-path",
+        "no-extra-file",
+        "command-output",
+        "no_unanswered_questions",
+    ] {
+        assert!(
+            results.iter().any(|result| result.id == id && result.pass),
+            "{id} should pass: {results:#?}"
+        );
+    }
+    assert_eq!(compute_weighted_score(&results), 1.0);
+}
+
+#[test]
 fn tool_called_accepts_tool_pattern() {
     let yaml = "scenario: pattern\nsystem_prompt: Body\nassertions:\n  - id: codegraph\n    type: tool_called\n    tool_pattern: '^mcp__.*__codegraph_context$'\n";
     let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");

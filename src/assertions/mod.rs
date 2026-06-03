@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -240,6 +244,55 @@ fn evaluate_assertion(spec: &AssertionSpec, trace: &TraceRecord) -> AssertionRes
                 format!("invalid regex: {err}"),
             ),
         },
+        AssertionSpec::FileContains {
+            id,
+            weight,
+            path,
+            pattern,
+        } => evaluate_file_contains(id, *weight, path, pattern, false, trace),
+        AssertionSpec::FileNotContains {
+            id,
+            weight,
+            path,
+            pattern,
+        } => evaluate_file_contains(id, *weight, path, pattern, true, trace),
+        AssertionSpec::FileEquals {
+            id,
+            weight,
+            path,
+            content,
+        } => evaluate_file_equals(id, *weight, path, content, trace),
+        AssertionSpec::FileExists { id, weight, path } => {
+            evaluate_file_exists(id, *weight, path, true, trace)
+        }
+        AssertionSpec::FileNotExists { id, weight, path } => {
+            evaluate_file_exists(id, *weight, path, false, trace)
+        }
+        AssertionSpec::JsonValid { id, weight, path } => {
+            evaluate_json_valid(id, *weight, path, trace)
+        }
+        AssertionSpec::JsonPathEquals {
+            id,
+            weight,
+            path,
+            json_path,
+            value,
+        } => evaluate_json_path_equals(id, *weight, path, json_path, value, trace),
+        AssertionSpec::CommandSucceeds {
+            id,
+            weight,
+            command,
+            timeout_seconds,
+        } => evaluate_command_succeeds(id, *weight, command, *timeout_seconds, trace),
+        AssertionSpec::CommandOutputContains {
+            id,
+            weight,
+            command,
+            pattern,
+            timeout_seconds,
+        } => {
+            evaluate_command_output_contains(id, *weight, command, pattern, *timeout_seconds, trace)
+        }
         AssertionSpec::FileRead { id, weight, path } => {
             evaluate_file_read(id, *weight, path, trace)
         }
@@ -312,6 +365,223 @@ fn evaluate_file_read(
             format!("no file read matched `{path_pattern}`"),
         )
     }
+}
+
+fn evaluate_file_contains(
+    id: &str,
+    weight: f64,
+    path: &str,
+    pattern: &str,
+    invert: bool,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let kind = if invert {
+        "file_not_contains"
+    } else {
+        "file_contains"
+    };
+    let re = match compile_pattern(pattern) {
+        Ok(re) => re,
+        Err(err) => return base_result(id, kind, false, weight, format!("invalid regex: {err}")),
+    };
+    let content = match read_sandbox_file(path, trace) {
+        Ok(content) => content,
+        Err(err) => return base_result(id, kind, false, weight, err),
+    };
+    let matched = re.is_match(&content);
+    let pass = if invert { !matched } else { matched };
+    base_result(
+        id,
+        kind,
+        pass,
+        weight,
+        match (invert, matched) {
+            (false, true) => format!("file `{path}` matched pattern"),
+            (false, false) => format!("file `{path}` did not match pattern"),
+            (true, true) => format!("file `{path}` matched unexpected pattern"),
+            (true, false) => format!("file `{path}` did not match pattern"),
+        },
+    )
+}
+
+fn evaluate_file_equals(
+    id: &str,
+    weight: f64,
+    path: &str,
+    expected: &str,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let content = match read_sandbox_file(path, trace) {
+        Ok(content) => content,
+        Err(err) => return base_result(id, "file_equals", false, weight, err),
+    };
+    let pass = content == expected;
+    base_result(
+        id,
+        "file_equals",
+        pass,
+        weight,
+        if pass {
+            format!("file `{path}` matched expected content")
+        } else {
+            format!(
+                "file `{path}` content differed (actual {} chars, expected {} chars)",
+                content.chars().count(),
+                expected.chars().count()
+            )
+        },
+    )
+}
+
+fn evaluate_file_exists(
+    id: &str,
+    weight: f64,
+    path: &str,
+    expected_exists: bool,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let kind = if expected_exists {
+        "file_exists"
+    } else {
+        "file_not_exists"
+    };
+    let resolved = match resolve_sandbox_candidate(path, trace) {
+        Ok(path) => path,
+        Err(err) => return base_result(id, kind, false, weight, err),
+    };
+    let exists = resolved.exists();
+    let pass = exists == expected_exists;
+    base_result(
+        id,
+        kind,
+        pass,
+        weight,
+        match (expected_exists, exists) {
+            (true, true) => format!("file `{path}` exists"),
+            (true, false) => format!("file `{path}` does not exist"),
+            (false, true) => format!("file `{path}` exists unexpectedly"),
+            (false, false) => format!("file `{path}` does not exist"),
+        },
+    )
+}
+
+fn evaluate_json_valid(id: &str, weight: f64, path: &str, trace: &TraceRecord) -> AssertionResult {
+    match read_sandbox_json(path, trace) {
+        Ok(_) => base_result(
+            id,
+            "json_valid",
+            true,
+            weight,
+            format!("file `{path}` is valid JSON"),
+        ),
+        Err(err) => base_result(id, "json_valid", false, weight, err),
+    }
+}
+
+fn evaluate_json_path_equals(
+    id: &str,
+    weight: f64,
+    path: &str,
+    json_path: &str,
+    expected: &Value,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let json = match read_sandbox_json(path, trace) {
+        Ok(json) => json,
+        Err(err) => return base_result(id, "json_path_equals", false, weight, err),
+    };
+    let actual = value_at_path(&json, json_path);
+    let pass = actual == Some(expected);
+    base_result(
+        id,
+        "json_path_equals",
+        pass,
+        weight,
+        if pass {
+            format!("JSON path `{json_path}` in `{path}` matched expected value")
+        } else {
+            format!(
+                "JSON path `{json_path}` in `{path}` was {}, expected {}",
+                actual
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "<missing>".to_string()),
+                expected
+            )
+        },
+    )
+}
+
+fn evaluate_command_succeeds(
+    id: &str,
+    weight: f64,
+    command: &str,
+    timeout_seconds: Option<u64>,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let result = match run_sandbox_command(command, timeout_seconds, trace) {
+        Ok(result) => result,
+        Err(err) => return base_result(id, "command_succeeds", false, weight, err),
+    };
+    base_result(
+        id,
+        "command_succeeds",
+        result.status_success,
+        weight,
+        if result.status_success {
+            format!("command succeeded: `{command}`")
+        } else {
+            format!(
+                "command failed: `{command}`\nstdout preview:\n{}\nstderr preview:\n{}",
+                preview_text(&result.stdout, 500),
+                preview_text(&result.stderr, 500)
+            )
+        },
+    )
+}
+
+fn evaluate_command_output_contains(
+    id: &str,
+    weight: f64,
+    command: &str,
+    pattern: &str,
+    timeout_seconds: Option<u64>,
+    trace: &TraceRecord,
+) -> AssertionResult {
+    let re = match compile_pattern(pattern) {
+        Ok(re) => re,
+        Err(err) => {
+            return base_result(
+                id,
+                "command_output_contains",
+                false,
+                weight,
+                format!("invalid regex: {err}"),
+            )
+        }
+    };
+    let result = match run_sandbox_command(command, timeout_seconds, trace) {
+        Ok(result) => result,
+        Err(err) => return base_result(id, "command_output_contains", false, weight, err),
+    };
+    let combined = format!("{}\n{}", result.stdout, result.stderr);
+    let pass = result.status_success && re.is_match(&combined);
+    base_result(
+        id,
+        "command_output_contains",
+        pass,
+        weight,
+        if pass {
+            format!("command output matched pattern: `{command}`")
+        } else if !result.status_success {
+            format!(
+                "command failed before matching output: `{command}`\nstdout preview:\n{}\nstderr preview:\n{}",
+                preview_text(&result.stdout, 500),
+                preview_text(&result.stderr, 500)
+            )
+        } else {
+            format!("command output did not match pattern: `{command}`")
+        },
+    )
 }
 
 fn file_read_call_matches(call: &ToolCallRecord, path_re: &regex::Regex) -> bool {
@@ -763,6 +1033,107 @@ fn tool_selected(call: &ToolCallRecord, tools: Option<&[String]>) -> bool {
     tools
         .map(|tools| tools.iter().any(|tool| tool == &call.name))
         .unwrap_or_else(|| !tool_path_inputs(call).is_empty())
+}
+
+fn read_sandbox_file(path: &str, trace: &TraceRecord) -> Result<String, String> {
+    let resolved = resolve_sandbox_existing(path, trace)?;
+    fs::read_to_string(&resolved).map_err(|err| format!("read `{path}`: {err}"))
+}
+
+fn read_sandbox_json(path: &str, trace: &TraceRecord) -> Result<Value, String> {
+    let content = read_sandbox_file(path, trace)?;
+    serde_json::from_str(&content).map_err(|err| format!("parse JSON `{path}`: {err}"))
+}
+
+fn resolve_sandbox_existing(path: &str, trace: &TraceRecord) -> Result<PathBuf, String> {
+    let sandbox = trace_sandbox_path(trace)?;
+    path_util::resolve_existing_inside(&sandbox, Path::new(path))
+        .map_err(|err| format!("resolve `{path}` inside sandbox: {err}"))
+}
+
+fn resolve_sandbox_candidate(path: &str, trace: &TraceRecord) -> Result<PathBuf, String> {
+    let sandbox = trace_sandbox_path(trace)?;
+    path_util::resolve_write_target_inside(&sandbox, Path::new(path))
+        .map_err(|err| format!("resolve `{path}` inside sandbox: {err}"))
+}
+
+fn trace_sandbox_path(trace: &TraceRecord) -> Result<PathBuf, String> {
+    let raw = trace
+        .runner
+        .sandbox_path
+        .as_deref()
+        .ok_or_else(|| "sandbox path is missing from trace".to_string())?;
+    Ok(path_util::canonicalize_existing(Path::new(raw))
+        .unwrap_or_else(|_| path_util::normalize_path_lexical(Path::new(raw))))
+}
+
+#[derive(Debug)]
+struct CommandResult {
+    status_success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+fn run_sandbox_command(
+    command: &str,
+    timeout_seconds: Option<u64>,
+    trace: &TraceRecord,
+) -> Result<CommandResult, String> {
+    let sandbox = trace_sandbox_path(trace)?;
+    let mut child = shell_command(command)
+        .current_dir(&sandbox)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("spawn command `{command}`: {err}"))?;
+    let timeout = Duration::from_secs(timeout_seconds.unwrap_or(30));
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|err| format!("collect command `{command}` output: {err}"))?;
+                return Ok(CommandResult {
+                    status_success: output.status.success(),
+                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "command timed out after {}s: `{command}`",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(err) => return Err(format!("wait for command `{command}`: {err}")),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", command]);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn shell_command(command: &str) -> Command {
+    let mut cmd = Command::new("/bin/sh");
+    cmd.args(["-c", command]);
+    cmd
+}
+
+fn preview_text(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 fn tool_path_inputs(call: &ToolCallRecord) -> Vec<(&'static str, String)> {

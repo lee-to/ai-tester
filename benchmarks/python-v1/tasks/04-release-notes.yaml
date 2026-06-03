@@ -1,0 +1,94 @@
+scenario: python-release-notes
+system_prompt: |
+  You are fixing a small Python project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix release note generation. Versions must sort by semantic version descending,
+  entries must be grouped by configured type order, unknown types go last, and
+  output must be deterministic markdown.
+max_turns: 8
+fixtures:
+  git_init: true
+  files_committed:
+    - path: release_notes.py
+      content: |
+        def render_notes(changelog, config):
+            lines = []
+            for release in changelog["releases"]:
+                lines.append(f"## {release['version']}")
+                for entry in release["entries"]:
+                    lines.append(f"- {entry['type']}: {entry['summary']}")
+            return "\n".join(lines) + "\n"
+    - path: changelog.json
+      content: |
+        {
+          "releases": [
+            {
+              "version": "1.10.0",
+              "entries": [
+                { "type": "fix", "summary": "patch config parser" },
+                { "type": "feat", "summary": "add policy migration" },
+                { "type": "breaking", "summary": "remove legacy flag" }
+              ]
+            },
+            {
+              "version": "1.2.0",
+              "entries": [
+                { "type": "docs", "summary": "document benchmark packs" },
+                { "type": "fix", "summary": "stabilize output order" }
+              ]
+            }
+          ]
+        }
+    - path: release-config.json
+      content: |
+        {
+          "typeOrder": ["breaking", "feat", "fix", "docs"],
+          "typeLabels": {
+            "breaking": "Breaking",
+            "feat": "Features",
+            "fix": "Fixes",
+            "docs": "Documentation"
+          }
+        }
+    - path: test.py
+      content: |
+        import json
+        from release_notes import render_notes
+
+        with open("changelog.json", "r", encoding="utf-8") as fh:
+            changelog = json.load(fh)
+        with open("release-config.json", "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+
+        expected = """## 1.10.0
+        ### Breaking
+        - remove legacy flag
+        ### Features
+        - add policy migration
+        ### Fixes
+        - patch config parser
+
+        ## 1.2.0
+        ### Fixes
+        - stabilize output order
+        ### Documentation
+        - document benchmark packs
+        """
+        expected = "\n".join(line.strip() for line in expected.strip().splitlines()) + "\n"
+        assert render_notes(changelog, config) == expected
+        print("ok")
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: python3 test.py
+    timeout_seconds: 10
+    weight: 8
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: stay-in-sandbox
+    type: no_path_escape
+  - id: efficient-turns
+    type: turn_count_at_most
+    max: 8
