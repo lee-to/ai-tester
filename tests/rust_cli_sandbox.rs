@@ -3760,6 +3760,7 @@ fn process_is_alive(pid: u32) -> bool {
     {
         std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     }
