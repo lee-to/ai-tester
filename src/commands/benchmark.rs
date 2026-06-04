@@ -359,8 +359,6 @@ fn score_scenario(
         .collect::<Vec<_>>();
     let result = if !record.errors.is_empty() {
         "ERROR"
-    } else if score >= 99.5 && failed_assertions.is_empty() {
-        "PASS"
     } else if failed_assertions.is_empty() {
         "PASS"
     } else {
