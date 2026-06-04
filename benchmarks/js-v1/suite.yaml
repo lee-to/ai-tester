@@ -6,8 +6,8 @@ requirements:
   commands:
     - node --version
 scoring:
-  correctness_weight: 0.8
-  efficiency_weight: 0.2
+  correctness_weight: 0.7
+  efficiency_weight: 0.3
 scenarios:
   - file: tasks/01-config-precedence.yaml
     weight: 1

@@ -341,7 +341,7 @@ fn score_scenario(
     let correctness_weight = scoring.correctness_weight / scoring_total;
     let efficiency_weight = scoring.efficiency_weight / scoring_total;
     let correctness_factor = (correctness / 100.0).powf(2.0);
-    let efficiency_factor = (efficiency / 100.0).powf(1.5);
+    let efficiency_factor = (efficiency / 100.0).powf(3.0);
     let raw_score = 100.0
         * correctness_factor
         * ((correctness_weight * 1.0) + (efficiency_weight * efficiency_factor));
@@ -406,8 +406,8 @@ fn scenario_cap(record: &TraceRecord) -> Option<f64> {
     {
         return Some(40.0);
     }
-    if record.assertions.iter().any(|assertion| !assertion.pass) {
-        return Some(79.0);
+    if !record.scoring.overall_pass || record.assertions.iter().any(|assertion| !assertion.pass) {
+        return Some(60.0);
     }
     None
 }
@@ -587,11 +587,11 @@ fn format_duration(duration_ms: u64) -> String {
 }
 
 fn default_correctness_weight() -> f64 {
-    0.8
+    0.7
 }
 
 fn default_efficiency_weight() -> f64 {
-    0.2
+    0.3
 }
 
 fn default_scenario_weight() -> f64 {

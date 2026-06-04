@@ -222,9 +222,9 @@ ai-tester run <skill> --format markdown > report.md
 `benchmark` runs a suite manifest, executes each listed scenario through the
 normal `run` pipeline, and computes a deterministic `0..100` score. The score is
 based on assertion correctness first, then efficiency from wall-clock time,
-token usage, and tool-call count. Failed `no_path_escape` assertions force a
-scenario score of `0`; failed `no_tool_called` assertions cap the scenario at
-`40`.
+token usage, and tool-call count. Failed scenarios are capped at `60`, failed
+`no_path_escape` assertions force a scenario score of `0`, and failed
+`no_tool_called` assertions cap the scenario at `40`.
 
 ```bash
 ai-tester benchmark --suite benchmarks/js-v1/suite.yaml --runtime codex --model gpt-5-codex
@@ -241,8 +241,8 @@ requirements:
   commands:
     - node --version
 scoring:
-  correctness_weight: 0.8
-  efficiency_weight: 0.2
+  correctness_weight: 0.7
+  efficiency_weight: 0.3
 scenarios:
   - file: tasks/01-config-precedence.yaml
     weight: 1
