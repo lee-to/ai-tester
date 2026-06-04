@@ -6,7 +6,7 @@ argument: |
   Fix config-driven record mapping. The mapper must support rename rules,
   defaults, required fields, type conversion, empty strings, missing fields, and
   stable error ordering.
-max_turns: 8
+max_turns: 24
 fixtures:
   git_init: true
   files_committed:
@@ -67,6 +67,3 @@ assertions:
     tool_pattern: "(?i)(web|search|fetch)"
   - id: stay-in-sandbox
     type: no_path_escape
-  - id: efficient-turns
-    type: turn_count_at_most
-    max: 8

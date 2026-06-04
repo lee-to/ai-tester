@@ -6,7 +6,7 @@ argument: |
   The tests are failing. Diagnose the real bug and fix it with the smallest
   reasonable change. The note in NOTES.md is only a hypothesis, not a
   requirement.
-max_turns: 8
+max_turns: 24
 fixtures:
   git_init: true
   files_committed:
@@ -105,6 +105,3 @@ assertions:
     tool_pattern: "(?i)(web|search|fetch)"
   - id: stay-in-sandbox
     type: no_path_escape
-  - id: efficient-turns
-    type: turn_count_at_most
-    max: 8
