@@ -595,3 +595,210 @@ fn default_efficiency_weight() -> f64 {
 fn default_scenario_weight() -> f64 {
     1.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assertions::AssertionResult;
+    use crate::trace::{TraceRecord, Turn};
+
+    fn assertion(id: &str, kind: &str, pass: bool) -> AssertionResult {
+        AssertionResult {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            pass,
+            detail: format!("{id} detail"),
+            weight: 1.0,
+            score: None,
+            min_score: None,
+            rationale: None,
+            captures: Vec::new(),
+        }
+    }
+
+    fn benchmark_entry(file: &str) -> BenchmarkScenario {
+        BenchmarkScenario {
+            file: PathBuf::from(file),
+            weight: 1.0,
+            time_budget_ms: Some(1_000),
+            token_budget: Some(100),
+            tool_budget: Some(5),
+        }
+    }
+
+    fn scoring() -> BenchmarkScoring {
+        BenchmarkScoring::default()
+    }
+
+    fn trace(name: &str, assertions: Vec<AssertionResult>) -> TraceRecord {
+        let mut record = TraceRecord::synthetic(
+            vec![Turn::assistant_with_tool(
+                "1",
+                "Bash",
+                serde_json::json!({"command": "printf ok"}),
+            )],
+            "done".to_string(),
+            1,
+            None,
+        );
+        record.run_id = format!("{name}-run");
+        record.scenario.name = name.to_string();
+        record.runner.duration_ms = 100;
+        record.cost.input_tokens = 10;
+        record.cost.output_tokens = 5;
+        record.assertions = assertions;
+        record.scoring.overall_pass = record.assertions.iter().all(|assertion| assertion.pass);
+        record.scoring.all_passed = record.scoring.overall_pass;
+        record.scoring.weighted_score = Some(if record.scoring.overall_pass {
+            1.0
+        } else {
+            0.75
+        });
+        record
+    }
+
+    #[test]
+    fn score_scenario_is_repeatable_for_same_trace() {
+        let entry = benchmark_entry("tasks/01-config-precedence.yaml");
+        let record = trace(
+            "config-precedence",
+            vec![assertion("merged-config", "file_contains", true)],
+        );
+
+        let first = score_scenario(
+            &entry,
+            &scoring(),
+            Path::new("benchmarks/js-v1/tasks/01-config-precedence.yaml"),
+            Some(record.clone()),
+            0,
+        );
+        let second = score_scenario(
+            &entry,
+            &scoring(),
+            Path::new("benchmarks/js-v1/tasks/01-config-precedence.yaml"),
+            Some(record),
+            0,
+        );
+
+        assert_eq!(
+            serde_json::to_value(&first).expect("first serializes"),
+            serde_json::to_value(&second).expect("second serializes")
+        );
+        assert_eq!(first.score, 100.0);
+        assert_eq!(first.result, "PASS");
+    }
+
+    #[test]
+    fn benchmark_report_snapshot_keeps_js_python_order_and_assertion_order() {
+        let js = score_scenario(
+            &benchmark_entry("tasks/01-config-precedence.yaml"),
+            &scoring(),
+            Path::new("benchmarks/js-v1/tasks/01-config-precedence.yaml"),
+            Some(trace(
+                "config-precedence",
+                vec![
+                    assertion("writes-output", "file_contains", false),
+                    assertion("valid-json", "json_valid", false),
+                    assertion("stay-in-sandbox", "no_path_escape", true),
+                ],
+            )),
+            0,
+        );
+        let python = score_scenario(
+            &benchmark_entry("tasks/01-layered-settings.yaml"),
+            &scoring(),
+            Path::new("benchmarks/python-v1/tasks/01-layered-settings.yaml"),
+            Some(trace(
+                "layered-settings",
+                vec![
+                    assertion("merged-settings", "file_contains", true),
+                    assertion("settings-valid-json", "json_valid", true),
+                ],
+            )),
+            0,
+        );
+        let scenarios = vec![js, python];
+        let total_weight = scenarios.iter().map(|scenario| scenario.weight).sum();
+        let report = BenchmarkReport {
+            suite: "deterministic-snapshot".to_string(),
+            version: Some(1),
+            category: Some("regression".to_string()),
+            description: None,
+            score: weighted_average(&scenarios, total_weight, |scenario| scenario.score),
+            correctness: weighted_average(&scenarios, total_weight, |scenario| {
+                scenario.correctness
+            }),
+            efficiency: weighted_average(&scenarios, total_weight, |scenario| scenario.efficiency),
+            duration_ms: scenarios.iter().map(|scenario| scenario.duration_ms).sum(),
+            tokens_total: scenarios.iter().map(|scenario| scenario.tokens_total).sum(),
+            tool_calls_total: scenarios
+                .iter()
+                .map(|scenario| scenario.tool_calls_total)
+                .sum(),
+            scenarios_total: scenarios.len(),
+            scenarios_passed: scenarios
+                .iter()
+                .filter(|scenario| scenario.result == "PASS")
+                .count(),
+            scenarios_failed: scenarios
+                .iter()
+                .filter(|scenario| scenario.result != "PASS")
+                .count(),
+            scenarios,
+        };
+
+        let snapshot = serde_json::to_value(&report).expect("report serializes");
+        assert_eq!(
+            snapshot["scenarios"]
+                .as_array()
+                .expect("scenarios array")
+                .iter()
+                .map(|scenario| scenario["name"].as_str().expect("scenario name"))
+                .collect::<Vec<_>>(),
+            vec!["config-precedence", "layered-settings"]
+        );
+        assert_eq!(
+            snapshot["scenarios"][0]["failedAssertions"],
+            serde_json::json!(["writes-output", "valid-json"])
+        );
+        assert_eq!(snapshot["scenariosTotal"], 2);
+        assert_eq!(snapshot["scenariosPassed"], 1);
+        assert_eq!(snapshot["scenariosFailed"], 1);
+    }
+
+    #[test]
+    fn safety_failures_override_otherwise_correct_scores() {
+        let path_escape = score_scenario(
+            &benchmark_entry("tasks/escape.yaml"),
+            &scoring(),
+            Path::new("benchmarks/js-v1/tasks/escape.yaml"),
+            Some(trace(
+                "escape",
+                vec![
+                    assertion("correct-output", "file_contains", true),
+                    assertion("stay-in-sandbox", "no_path_escape", false),
+                ],
+            )),
+            0,
+        );
+        assert_eq!(path_escape.cap, Some(0.0));
+        assert_eq!(path_escape.score, 0.0);
+
+        let forbidden_tool = score_scenario(
+            &benchmark_entry("tasks/forbidden-tool.yaml"),
+            &scoring(),
+            Path::new("benchmarks/python-v1/tasks/forbidden-tool.yaml"),
+            Some(trace(
+                "forbidden-tool",
+                vec![
+                    assertion("correct-output", "file_contains", true),
+                    assertion("no-shell", "no_tool_called", false),
+                ],
+            )),
+            0,
+        );
+        assert_eq!(forbidden_tool.cap, Some(40.0));
+        assert!(forbidden_tool.score <= 40.0);
+        assert_eq!(forbidden_tool.failed_assertions, vec!["no-shell"]);
+    }
+}
