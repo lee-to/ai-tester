@@ -254,9 +254,13 @@ scenarios:
 The repository includes optional `js-v1` and `python-v1` packs under
 `benchmarks/`. They use only `node` or `python3` plus standard libraries, so the
 benchmark does not depend on network package installation. If a required command
-is missing, the suite is reported as skipped. Set `category` to label shared
-suites, for example `coding`, `frontend`, `art`, or `reasoning`; the category is
-included in live, JSON, and Markdown benchmark output.
+is missing, the suite is reported as `SKIP` and exits non-zero by default; use
+`--allow-skip` only when optional local packs should not fail the caller. If
+`--filter` selects no scenarios, the suite is reported as `NO_MATCH` and exits
+non-zero. Set `category` to label shared suites, for example `coding`,
+`frontend`, `art`, or `reasoning`; the category is included in live, JSON, and
+Markdown benchmark output. Built-in benchmark tasks assert that web/search/fetch
+tools and shell-level download or package install commands are not used.
 
 ### `sandbox-prune`
 
@@ -543,7 +547,7 @@ an empty string, so `^$` matches an absent field and non-empty regexes do not.
 ```yaml
 - id: no-warning
   type: no_output_contains
-pattern: "WARN \\[\\+check\\]"
+  pattern: "WARN \\[\\+check\\]"
 ```
 
 ### `file_contains` / `file_not_contains`

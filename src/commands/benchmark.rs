@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ pub struct BenchmarkOptions {
     pub mcp_profile: Option<String>,
     pub acp_log: Option<PathBuf>,
     pub filter: Option<String>,
+    pub allow_skip: bool,
     pub keep_sandbox: bool,
     pub quiet: bool,
     pub idle_warn_seconds: u64,
@@ -26,6 +28,8 @@ pub struct BenchmarkOptions {
     pub acp_turn_timeout_seconds: Option<u64>,
     pub format: OutputFormat,
 }
+
+const REQUIREMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Deserialize)]
 struct BenchmarkSuite {
@@ -79,6 +83,7 @@ struct BenchmarkScenario {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BenchmarkReport {
+    status: String,
     suite: String,
     version: Option<u32>,
     category: Option<String>,
@@ -93,6 +98,13 @@ struct BenchmarkReport {
     scenarios_passed: usize,
     scenarios_failed: usize,
     scenarios: Vec<BenchmarkScenarioReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkRequirementFailure {
+    command: String,
+    status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +140,7 @@ pub fn benchmark_command(opts: BenchmarkOptions) -> anyhow::Result<i32> {
             OutputFormat::Json => println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "SKIP",
                     "suite": suite.suite,
                     "category": suite.category,
                     "skipped": true,
@@ -140,13 +153,21 @@ pub fn benchmark_command(opts: BenchmarkOptions) -> anyhow::Result<i32> {
                     "  {} {}",
                     ui::paint("●", Tone::Warning),
                     ui::paint(
-                        &format!("SKIP {}: missing {}", suite.suite, missing.join(", ")),
+                        &format!(
+                            "SKIP {}: missing {}",
+                            suite.suite,
+                            missing
+                                .iter()
+                                .map(|failure| format!("{} ({})", failure.command, failure.status))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
                         Tone::Warning,
                     )
                 );
             }
         }
-        return Ok(0);
+        return Ok(if opts.allow_skip { 0 } else { 1 });
     }
 
     let report = run_suite(&suite, &suite_path, &opts)?;
@@ -156,7 +177,7 @@ pub fn benchmark_command(opts: BenchmarkOptions) -> anyhow::Result<i32> {
         OutputFormat::Live => print_live(&report, &opts),
     }
 
-    Ok(if report.scenarios_failed == 0 { 0 } else { 1 })
+    Ok(if report.status == "PASS" { 0 } else { 1 })
 }
 
 fn load_suite(path: &Path) -> anyhow::Result<BenchmarkSuite> {
@@ -208,15 +229,14 @@ fn run_suite(
 ) -> anyhow::Result<BenchmarkReport> {
     let base = suite_path.parent().unwrap_or_else(|| Path::new("."));
     let mut scenarios = Vec::new();
+    let selected = selected_scenarios(suite, opts.filter.as_deref());
 
-    for entry in &suite.scenarios {
+    if selected.is_empty() {
+        return Ok(empty_report(suite, "NO_MATCH"));
+    }
+
+    for entry in selected {
         let file = base.join(&entry.file);
-        if let Some(filter) = &opts.filter {
-            let file_label = entry.file.display().to_string();
-            if !file_label.contains(filter) {
-                continue;
-            }
-        }
         if opts.format == OutputFormat::Live && !opts.quiet {
             println!(
                 "{} {}",
@@ -278,8 +298,10 @@ fn run_suite(
         .iter()
         .filter(|scenario| scenario.result == "PASS")
         .count();
+    let failed = scenarios.len().saturating_sub(passed);
 
     Ok(BenchmarkReport {
+        status: if failed == 0 { "PASS" } else { "FAIL" }.to_string(),
         suite: suite.suite.clone(),
         version: suite.version,
         category: suite.category.clone(),
@@ -292,9 +314,42 @@ fn run_suite(
         tool_calls_total,
         scenarios_total: scenarios.len(),
         scenarios_passed: passed,
-        scenarios_failed: scenarios.len().saturating_sub(passed),
+        scenarios_failed: failed,
         scenarios,
     })
+}
+
+fn selected_scenarios<'a>(
+    suite: &'a BenchmarkSuite,
+    filter: Option<&str>,
+) -> Vec<&'a BenchmarkScenario> {
+    suite
+        .scenarios
+        .iter()
+        .filter(|entry| {
+            filter.is_none_or(|filter| entry.file.display().to_string().contains(filter))
+        })
+        .collect()
+}
+
+fn empty_report(suite: &BenchmarkSuite, status: &str) -> BenchmarkReport {
+    BenchmarkReport {
+        status: status.to_string(),
+        suite: suite.suite.clone(),
+        version: suite.version,
+        category: suite.category.clone(),
+        description: suite.description.clone(),
+        score: 0.0,
+        correctness: 0.0,
+        efficiency: 0.0,
+        duration_ms: 0,
+        tokens_total: 0,
+        tool_calls_total: 0,
+        scenarios_total: 0,
+        scenarios_passed: 0,
+        scenarios_failed: 0,
+        scenarios: Vec::new(),
+    }
 }
 
 fn score_scenario(
@@ -454,21 +509,46 @@ where
         / total_weight
 }
 
-fn missing_requirements(requirements: &BenchmarkRequirements) -> Vec<String> {
+fn missing_requirements(requirements: &BenchmarkRequirements) -> Vec<BenchmarkRequirementFailure> {
     requirements
         .commands
         .iter()
-        .filter(|command| !requirement_command_succeeds(command))
-        .cloned()
+        .filter_map(|command| {
+            requirement_command_succeeds(command, REQUIREMENT_TIMEOUT)
+                .err()
+                .map(|status| BenchmarkRequirementFailure {
+                    command: command.clone(),
+                    status,
+                })
+        })
         .collect()
 }
 
-fn requirement_command_succeeds(command: &str) -> bool {
-    shell_command(command)
+fn requirement_command_succeeds(command: &str, timeout: Duration) -> Result<(), String> {
+    let mut child = shell_command(command)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .spawn()
+        .map_err(|err| format!("failed to start: {err}"))?;
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("failed to wait: {err}"))?
+        {
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("exit {}", status.code().unwrap_or(1)))
+            };
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timeout after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[cfg(windows)]
@@ -503,6 +583,7 @@ fn resolve_suite_path(path: &Path) -> anyhow::Result<PathBuf> {
 fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
     println!("{}", ui::header("ai-tester", "benchmark"));
     println!("  {}", ui::kv("suite", &report.suite));
+    println!("  {}", ui::kv("status", &report.status));
     if let Some(category) = &report.category {
         println!("  {}", ui::kv("category", category));
     }
@@ -529,6 +610,14 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
     println!("  {}", ui::kv("tools", report.tool_calls_total));
     println!();
     println!("  {}", ui::section("Scenarios"));
+    if report.scenarios.is_empty() {
+        println!(
+            "  {} {}",
+            ui::paint("●", Tone::Error),
+            ui::paint("NO_MATCH no benchmark scenarios selected", Tone::Error)
+        );
+        return;
+    }
     for scenario in &report.scenarios {
         let pass = scenario.result == "PASS";
         let tone = if pass { Tone::Success } else { Tone::Error };
@@ -548,6 +637,7 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
 fn render_markdown(report: &BenchmarkReport) -> String {
     let mut out = String::new();
     out.push_str(&format!("# ai-tester benchmark: {}\n\n", report.suite));
+    out.push_str(&format!("**Status:** {}\n\n", report.status));
     if let Some(category) = &report.category {
         out.push_str(&format!("**Category:** {category}\n\n"));
     }
@@ -720,6 +810,7 @@ mod tests {
         let scenarios = vec![js, python];
         let total_weight = scenarios.iter().map(|scenario| scenario.weight).sum();
         let report = BenchmarkReport {
+            status: "FAIL".to_string(),
             suite: "deterministic-snapshot".to_string(),
             version: Some(1),
             category: Some("regression".to_string()),
@@ -764,6 +855,44 @@ mod tests {
         assert_eq!(snapshot["scenariosTotal"], 2);
         assert_eq!(snapshot["scenariosPassed"], 1);
         assert_eq!(snapshot["scenariosFailed"], 1);
+    }
+
+    #[test]
+    fn selected_scenarios_returns_empty_for_unmatched_filter() {
+        let suite = BenchmarkSuite {
+            suite: "filter-suite".to_string(),
+            version: Some(1),
+            category: None,
+            description: None,
+            requirements: BenchmarkRequirements::default(),
+            scoring: BenchmarkScoring::default(),
+            scenarios: vec![
+                benchmark_entry("tasks/selected.yaml"),
+                benchmark_entry("tasks/other.yaml"),
+            ],
+        };
+
+        assert_eq!(
+            selected_scenarios(&suite, Some("selected"))
+                .iter()
+                .map(|scenario| scenario.file.display().to_string())
+                .collect::<Vec<_>>(),
+            vec!["tasks/selected.yaml"]
+        );
+        assert!(selected_scenarios(&suite, Some("missing")).is_empty());
+    }
+
+    #[test]
+    fn requirement_probe_times_out() {
+        let command = if cfg!(windows) {
+            "powershell -NoProfile -Command \"Start-Sleep -Seconds 2\""
+        } else {
+            "sleep 2"
+        };
+
+        let err = requirement_command_succeeds(command, Duration::from_millis(100))
+            .expect_err("sleeping requirement should time out");
+        assert!(err.contains("timeout"));
     }
 
     #[test]

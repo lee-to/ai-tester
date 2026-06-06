@@ -91,6 +91,8 @@ enum Commands {
         #[arg(long)]
         filter: Option<String>,
         #[arg(long)]
+        allow_skip: bool,
+        #[arg(long)]
         keep_sandbox: bool,
         #[arg(long)]
         quiet: bool,
@@ -226,6 +228,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             mcp_profile,
             acp_log,
             filter,
+            allow_skip,
             keep_sandbox,
             quiet,
             idle_warn,
@@ -242,6 +245,7 @@ pub fn main_entry() -> anyhow::Result<()> {
             mcp_profile,
             acp_log,
             filter,
+            allow_skip,
             keep_sandbox,
             quiet,
             idle_warn_seconds: idle_warn,

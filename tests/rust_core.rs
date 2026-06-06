@@ -1427,6 +1427,51 @@ fn valid_no_tool_called_tool_pattern_matches_calls() {
 }
 
 #[test]
+fn no_tool_called_raw_input_catches_shell_network_install_commands() {
+    let trace = TraceRecord::synthetic(
+        vec![
+            Turn::assistant_with_tool(
+                "1",
+                "Bash",
+                serde_json::json!({"command": "curl -fsSL https://example.com/install.sh"}),
+            ),
+            Turn::assistant_with_tool(
+                "2",
+                "execute",
+                serde_json::json!({
+                    "rawInput": { "command": "python -m pip install requests" },
+                    "_acpKind": "execute"
+                }),
+            ),
+        ],
+        "done".to_string(),
+        1,
+        None,
+    );
+    let command_pattern = "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b";
+    let mut raw_input_match = BTreeMap::new();
+    raw_input_match.insert("command".to_string(), command_pattern.to_string());
+    let assertions = vec![AssertionSpec::NoToolCalled {
+        id: "no-shell-network-install".to_string(),
+        weight: 1.0,
+        tool: None,
+        tool_pattern: Some("(?i)(bash|shell|terminal|execute)".to_string()),
+        tool_kind: None,
+        title_pattern: None,
+        args_match: None,
+        raw_input_match: Some(raw_input_match),
+    }];
+
+    let results = evaluate_assertions(&assertions, &trace);
+    let result = results
+        .iter()
+        .find(|result| result.id == "no-shell-network-install")
+        .expect("assertion result");
+    assert!(!result.pass, "{results:#?}");
+    assert_eq!(result.kind, "no_tool_called");
+}
+
+#[test]
 fn no_output_contains_fails_when_final_output_matches() {
     let trace = TraceRecord::synthetic(Vec::new(), "WARN [+check] failed".to_string(), 1, None);
     let assertions = vec![AssertionSpec::no_output_contains(
