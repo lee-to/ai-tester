@@ -183,6 +183,8 @@ ai-tester compare <run-a> <run-b>
 ai-tester compare <run-a> <run-b> --json
 ai-tester benchmark --suite benchmarks/js-v1/suite.yaml --runtime codex
 ai-tester benchmark --suite benchmarks/python-v1/suite.yaml --runtime codex --format markdown
+ai-tester compare --benchmark before.json after.json
+ai-tester compare --benchmark before.json after.json --json
 
 # Runtime and housekeeping
 ai-tester runtimes
@@ -795,6 +797,7 @@ ai-tester history --json
 ai-tester trend <skill> --scenario <scenario-id> --last 10
 ai-tester trace <run-id>
 ai-tester compare <run-a> <run-b>
+ai-tester compare --benchmark before.json after.json
 ```
 
 History reads v2 traces under `runs/` and prints newest runs first.
@@ -804,6 +807,8 @@ History reads v2 traces under `runs/` and prints newest runs first.
 `trace` pretty-prints one recorded run by `run_id`, JSON filename stem, or file path. Human output summarizes metadata, assertions, tool-call counts, turn timeline, errors, and a final-output preview; `--json` emits the full trace record.
 
 `compare` diffs two recorded runs by `run_id`, JSON filename stem, or file path. Human output shows status, score, duration, turns, token, assertion, tool-call, and error deltas; `--json` emits the same comparison data as JSON.
+
+`compare --benchmark` diffs two JSON benchmark reports produced with `ai-tester benchmark --format json`. Human output shows suite status, score, correctness, efficiency, duration, token, tool-call, scenario pass/fail, changed-scenario, and missing-requirement deltas; `--json` emits the same benchmark comparison data as JSON.
 
 ## Security Checks
 

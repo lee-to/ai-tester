@@ -129,6 +129,8 @@ enum Commands {
         run_a: String,
         run_b: String,
         #[arg(long)]
+        benchmark: bool,
+        #[arg(long)]
         json: bool,
     },
     #[command(about = "Pretty-print a recorded trace")]
@@ -277,11 +279,19 @@ pub fn main_entry() -> anyhow::Result<()> {
                 json,
             },
         )?,
-        Commands::Compare { run_a, run_b, json } => {
-            crate::commands::recorded_runs::compare_command(
-                crate::commands::recorded_runs::CompareOptions { run_a, run_b, json },
-            )?
-        }
+        Commands::Compare {
+            run_a,
+            run_b,
+            benchmark,
+            json,
+        } => crate::commands::recorded_runs::compare_command(
+            crate::commands::recorded_runs::CompareOptions {
+                run_a,
+                run_b,
+                benchmark,
+                json,
+            },
+        )?,
         Commands::Trace { run_id, json } => crate::commands::recorded_runs::trace_command(
             crate::commands::recorded_runs::TraceOptions { run_id, json },
         )?,

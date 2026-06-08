@@ -699,6 +699,169 @@ fn cli_compare_prints_deltas_and_json() {
 }
 
 #[test]
+fn cli_compare_benchmark_reports_prints_deltas_and_json() {
+    let tmp = TempDir::new().expect("temp dir");
+    let before = tmp.path().join("before.json");
+    let after = tmp.path().join("after.json");
+    fs::write(
+        &before,
+        serde_json::to_string_pretty(&json!({
+            "status": "FAIL",
+            "suite": "js-v1",
+            "version": 1,
+            "category": "coding",
+            "description": null,
+            "score": 60.0,
+            "correctness": 75.0,
+            "efficiency": 50.0,
+            "durationMs": 2000,
+            "tokensTotal": 1000,
+            "toolCallsTotal": 10,
+            "scenariosTotal": 2,
+            "scenariosPassed": 1,
+            "scenariosFailed": 1,
+            "scenarios": [
+                {
+                    "name": "config",
+                    "file": "tasks/config.yaml",
+                    "weight": 1.0,
+                    "result": "PASS",
+                    "score": 100.0,
+                    "correctness": 100.0,
+                    "efficiency": 100.0,
+                    "timeScore": 1.0,
+                    "tokenScore": 1.0,
+                    "toolScore": 1.0,
+                    "durationMs": 500,
+                    "tokensTotal": 300,
+                    "toolCallsTotal": 3,
+                    "traceId": "trace-a",
+                    "cap": null,
+                    "failedAssertions": [],
+                    "errors": []
+                },
+                {
+                    "name": "escape",
+                    "file": "tasks/escape.yaml",
+                    "weight": 1.0,
+                    "result": "FAIL",
+                    "score": 20.0,
+                    "correctness": 50.0,
+                    "efficiency": 20.0,
+                    "timeScore": 0.5,
+                    "tokenScore": 0.5,
+                    "toolScore": 0.5,
+                    "durationMs": 1500,
+                    "tokensTotal": 700,
+                    "toolCallsTotal": 7,
+                    "traceId": "trace-b",
+                    "cap": 40.0,
+                    "failedAssertions": ["no-shell"],
+                    "errors": []
+                }
+            ]
+        }))
+        .expect("benchmark report serializes"),
+    )
+    .expect("before report written");
+    fs::write(
+        &after,
+        serde_json::to_string_pretty(&json!({
+            "status": "PASS",
+            "suite": "js-v1",
+            "version": 1,
+            "category": "coding",
+            "description": null,
+            "score": 90.0,
+            "correctness": 95.0,
+            "efficiency": 80.0,
+            "durationMs": 1500,
+            "tokensTotal": 900,
+            "toolCallsTotal": 8,
+            "scenariosTotal": 2,
+            "scenariosPassed": 2,
+            "scenariosFailed": 0,
+            "scenarios": [
+                {
+                    "name": "config",
+                    "file": "tasks/config.yaml",
+                    "weight": 1.0,
+                    "result": "PASS",
+                    "score": 100.0,
+                    "correctness": 100.0,
+                    "efficiency": 100.0,
+                    "timeScore": 1.0,
+                    "tokenScore": 1.0,
+                    "toolScore": 1.0,
+                    "durationMs": 500,
+                    "tokensTotal": 300,
+                    "toolCallsTotal": 3,
+                    "traceId": "trace-c",
+                    "cap": null,
+                    "failedAssertions": [],
+                    "errors": []
+                },
+                {
+                    "name": "escape",
+                    "file": "tasks/escape.yaml",
+                    "weight": 1.0,
+                    "result": "PASS",
+                    "score": 80.0,
+                    "correctness": 90.0,
+                    "efficiency": 60.0,
+                    "timeScore": 0.8,
+                    "tokenScore": 0.8,
+                    "toolScore": 0.8,
+                    "durationMs": 1000,
+                    "tokensTotal": 600,
+                    "toolCallsTotal": 5,
+                    "traceId": "trace-d",
+                    "cap": null,
+                    "failedAssertions": [],
+                    "errors": []
+                }
+            ]
+        }))
+        .expect("benchmark report serializes"),
+    )
+    .expect("after report written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "compare",
+            "--benchmark",
+            before.to_str().unwrap(),
+            after.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ai-tester compare"))
+        .stdout(predicate::str::contains("benchmark A"))
+        .stdout(predicate::str::contains("js-v1"))
+        .stdout(predicate::str::contains("+30.0"))
+        .stdout(predicate::str::contains("escape"))
+        .stdout(predicate::str::contains("FAIL -> PASS"));
+
+    let mut json_cmd = Command::cargo_bin("ai-tester").expect("binary");
+    json_cmd
+        .current_dir(tmp.path())
+        .args([
+            "compare",
+            "--benchmark",
+            before.to_str().unwrap(),
+            after.to_str().unwrap(),
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"benchmarkA\""))
+        .stdout(predicate::str::contains("\"scoreDelta\": 30.0"))
+        .stdout(predicate::str::contains("\"scenarioChanges\""))
+        .stdout(predicate::str::contains("\"resultB\": \"PASS\""));
+}
+
+#[test]
 fn cli_trace_and_compare_missing_run_return_config_error() {
     let tmp = TempDir::new().expect("temp dir");
 
