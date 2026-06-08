@@ -1,0 +1,91 @@
+scenario: js-policy-migration
+system_prompt: |
+  You are fixing a small JavaScript project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Add backward-compatible policy config support. The old "roles" object and the
+  new "policies" array must both work. Deny rules must override allow rules,
+  duplicate permissions must be stable/deduped, and README examples must show
+  both formats.
+max_turns: 24
+fixtures:
+  git_init: true
+  files_committed:
+    - path: permissions.js
+      content: |
+        function permissionsFor(config, role) {
+          return config.roles[role] || [];
+        }
+
+        function can(config, role, permission) {
+          return permissionsFor(config, role).includes(permission);
+        }
+
+        module.exports = { permissionsFor, can };
+    - path: legacy-policy.json
+      content: |
+        {
+          "roles": {
+            "admin": ["read", "write", "write"],
+            "viewer": ["read"]
+          }
+        }
+    - path: new-policy.json
+      content: |
+        {
+          "policies": [
+            { "role": "admin", "allow": ["read", "write", "delete"] },
+            { "role": "admin", "deny": ["delete"] },
+            { "role": "auditor", "allow": ["read"] },
+            { "role": "auditor", "deny": ["write"] }
+          ]
+        }
+    - path: README.md
+      content: |
+        # Policy config
+
+        Legacy format:
+
+        ```json
+        { "roles": { "admin": ["read", "write"] } }
+        ```
+    - path: test.js
+      content: |
+        const assert = require("assert");
+        const legacy = require("./legacy-policy.json");
+        const modern = require("./new-policy.json");
+        const { permissionsFor, can } = require("./permissions");
+
+        assert.deepEqual(permissionsFor(legacy, "admin"), ["read", "write"]);
+        assert.equal(can(legacy, "viewer", "read"), true);
+        assert.equal(can(legacy, "viewer", "write"), false);
+
+        assert.deepEqual(permissionsFor(modern, "admin"), ["read", "write"]);
+        assert.equal(can(modern, "admin", "delete"), false);
+        assert.deepEqual(permissionsFor(modern, "auditor"), ["read"]);
+        assert.equal(can(modern, "auditor", "write"), false);
+        console.log("ok");
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: node test.js
+    timeout_seconds: 10
+    weight: 8
+  - id: readme-docs-new-format
+    type: file_contains
+    path: README.md
+    pattern: "policies"
+  - id: readme-keeps-legacy-format
+    type: file_contains
+    path: README.md
+    pattern: "roles"
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: no-shell-network-install
+    type: no_tool_called
+    tool_pattern: "(?i)(bash|shell|terminal|execute)"
+    raw_input_match:
+      command: "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b"
+  - id: stay-in-sandbox
+    type: no_path_escape

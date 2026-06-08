@@ -1,3 +1,4 @@
+pub mod benchmark;
 pub mod history;
 pub mod init;
 pub mod recorded_runs;

@@ -1,0 +1,75 @@
+scenario: python-layered-settings
+system_prompt: |
+  You are fixing a small Python project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix layered JSON settings. The intended precedence is user > team > base.
+  Objects deep-merge, null explicitly disables values, lists under "plugins"
+  merge without duplicates, and unknown keys must be preserved.
+max_turns: 24
+fixtures:
+  git_init: true
+  files_committed:
+    - path: settings.py
+      content: |
+        import copy
+
+        def merge_settings(base, team, user):
+            merged = copy.deepcopy(base)
+            merged.update(team)
+            merged.update(user)
+            return merged
+    - path: base.json
+      content: |
+        {
+          "theme": "light",
+          "limits": { "retries": 2, "timeout": 30 },
+          "plugins": ["core", "audit"],
+          "webhook": "https://example.test",
+          "unknown": { "keep": true }
+        }
+    - path: team.json
+      content: |
+        {
+          "limits": { "retries": 4 },
+          "plugins": ["audit", "billing"]
+        }
+    - path: user.json
+      content: |
+        {
+          "limits": { "timeout": 10 },
+          "plugins": ["local", "core"],
+          "webhook": null
+        }
+    - path: test.py
+      content: |
+        import json
+        from settings import merge_settings
+
+        def read(path):
+            with open(path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+
+        merged = merge_settings(read("base.json"), read("team.json"), read("user.json"))
+        assert merged["theme"] == "light"
+        assert merged["limits"] == {"retries": 4, "timeout": 10}
+        assert merged["plugins"] == ["core", "audit", "billing", "local"]
+        assert merged["webhook"] is None
+        assert merged["unknown"] == {"keep": True}
+        print("ok")
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: python3 test.py
+    timeout_seconds: 10
+    weight: 8
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: no-shell-network-install
+    type: no_tool_called
+    tool_pattern: "(?i)(bash|shell|terminal|execute)"
+    raw_input_match:
+      command: "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b"
+  - id: stay-in-sandbox
+    type: no_path_escape

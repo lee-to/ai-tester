@@ -157,6 +157,165 @@ fn cli_run_dry_run_validation_rejects_duplicate_assertion_ids() {
 }
 
 #[test]
+fn cli_benchmark_missing_requirement_is_nonzero_by_default() {
+    let tmp = TempDir::new().expect("temp dir");
+    let suite = tmp.path().join("suite.yaml");
+    fs::write(
+        &suite,
+        "suite: missing-requirement\nrequirements:\n  commands:\n    - definitely_missing_ai_tester_command_4633176904 --version\nscenarios:\n  - file: tasks/selected.yaml\n",
+    )
+    .expect("suite written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"status\": \"SKIP\""))
+        .stdout(predicate::str::contains(
+            "definitely_missing_ai_tester_command",
+        ));
+
+    let mut allow_skip = Command::cargo_bin("ai-tester").expect("binary");
+    allow_skip
+        .current_dir(tmp.path())
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--allow-skip",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"SKIP\""));
+}
+
+#[test]
+fn cli_benchmark_missing_requirement_markdown_uses_report_format() {
+    let tmp = TempDir::new().expect("temp dir");
+    let suite = tmp.path().join("suite.yaml");
+    fs::write(
+        &suite,
+        "suite: missing-requirement\nrequirements:\n  commands:\n    - definitely_missing_ai_tester_command_4633176904 --version\nscenarios:\n  - file: tasks/selected.yaml\n",
+    )
+    .expect("suite written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--format",
+            "markdown",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "# ai-tester benchmark: missing-requirement",
+        ))
+        .stdout(predicate::str::contains("**Status:** SKIP"))
+        .stdout(predicate::str::contains("| Missing requirement | Status |"))
+        .stdout(predicate::str::contains(
+            "definitely_missing_ai_tester_command",
+        ));
+}
+
+#[test]
+fn cli_benchmark_unmatched_filter_is_nonzero() {
+    let tmp = TempDir::new().expect("temp dir");
+    let tasks = tmp.path().join("tasks");
+    fs::create_dir_all(&tasks).expect("tasks dir");
+    fs::write(
+        tasks.join("selected.yaml"),
+        "scenario: selected\nsystem_prompt: You are helpful.\nassertions: []\n",
+    )
+    .expect("scenario written");
+    let suite = tmp.path().join("suite.yaml");
+    fs::write(
+        &suite,
+        "suite: filter-suite\nscenarios:\n  - file: tasks/selected.yaml\n",
+    )
+    .expect("suite written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--filter",
+            "does-not-match",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("\"status\": \"NO_MATCH\""))
+        .stdout(predicate::str::contains("\"scenariosTotal\": 0"));
+}
+
+#[test]
+fn cli_benchmark_matched_filter_runs_selected_scenario() {
+    let tmp = TempDir::new().expect("temp dir");
+    let bin_dir = tmp.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir");
+    write_fake_codex(&bin_dir);
+    let tasks = tmp.path().join("tasks");
+    fs::create_dir_all(&tasks).expect("tasks dir");
+    fs::write(
+        tasks.join("selected.yaml"),
+        "scenario: selected\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: says-done\n    type: output_contains\n    pattern: done\n",
+    )
+    .expect("selected scenario written");
+    fs::write(
+        tasks.join("other.yaml"),
+        "scenario: other\nsystem_prompt: You are helpful.\nrunner:\n  runtime: codex\n  model: fake-model\nassertions:\n  - id: impossible\n    type: output_contains\n    pattern: never-produced\n",
+    )
+    .expect("other scenario written");
+    let suite = tmp.path().join("suite.yaml");
+    fs::write(
+        &suite,
+        "suite: filter-suite\nscenarios:\n  - file: tasks/selected.yaml\n  - file: tasks/other.yaml\n",
+    )
+    .expect("suite written");
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let new_path = join_path_prefix(&bin_dir, &old_path);
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .env("PATH", new_path)
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--filter",
+            "selected",
+            "--runtime",
+            "codex",
+            "--model",
+            "fake-model",
+            "--quiet",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"PASS\""))
+        .stdout(predicate::str::contains("\"scenariosTotal\": 1"))
+        .stdout(predicate::str::contains("\"name\": \"selected\""))
+        .stdout(predicate::str::contains("\"name\": \"other\"").not());
+}
+
+#[test]
 fn cli_run_rejects_zero_setup_timeout() {
     let tmp = TempDir::new().expect("temp dir");
     let scenario = tmp.path().join("scenario.yaml");
@@ -1059,7 +1218,7 @@ fn cli_run_with_fake_acp_client_capabilities_logs_fs_and_terminal_operations() {
     fs::create_dir_all(&bin_dir).expect("bin dir");
     write_fake_acp_client_capabilities(&bin_dir);
     let terminal_marker = tmp.path().join("terminal-descendant.marker");
-    let idle_warn = if cfg!(windows) { "5" } else { "1" };
+    let idle_warn = "5";
     fs::write(
         tmp.path().join(".ai-tester.yaml"),
         format!(

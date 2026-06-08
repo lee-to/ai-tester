@@ -345,6 +345,68 @@ pub enum AssertionSpec {
         weight: f64,
         pattern: String,
     },
+    FileContains {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+        pattern: String,
+    },
+    FileNotContains {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+        pattern: String,
+    },
+    FileEquals {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+        content: String,
+    },
+    FileExists {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+    },
+    FileNotExists {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+    },
+    JsonValid {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+    },
+    JsonPathEquals {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        path: String,
+        json_path: String,
+        value: Value,
+    },
+    CommandSucceeds {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        command: String,
+        timeout_seconds: Option<u64>,
+    },
+    CommandOutputContains {
+        id: String,
+        #[serde(default = "default_weight")]
+        weight: f64,
+        command: String,
+        pattern: String,
+        timeout_seconds: Option<u64>,
+    },
     FileRead {
         id: String,
         #[serde(default = "default_weight")]
@@ -374,6 +436,15 @@ impl AssertionSpec {
             | Self::NoToolCalled { id, .. }
             | Self::OutputContains { id, .. }
             | Self::NoOutputContains { id, .. }
+            | Self::FileContains { id, .. }
+            | Self::FileNotContains { id, .. }
+            | Self::FileEquals { id, .. }
+            | Self::FileExists { id, .. }
+            | Self::FileNotExists { id, .. }
+            | Self::JsonValid { id, .. }
+            | Self::JsonPathEquals { id, .. }
+            | Self::CommandSucceeds { id, .. }
+            | Self::CommandOutputContains { id, .. }
             | Self::FileRead { id, .. }
             | Self::TurnCountAtMost { id, .. }
             | Self::NoPathEscape { id, .. } => id,
@@ -387,6 +458,15 @@ impl AssertionSpec {
             | Self::NoToolCalled { weight, .. }
             | Self::OutputContains { weight, .. }
             | Self::NoOutputContains { weight, .. }
+            | Self::FileContains { weight, .. }
+            | Self::FileNotContains { weight, .. }
+            | Self::FileEquals { weight, .. }
+            | Self::FileExists { weight, .. }
+            | Self::FileNotExists { weight, .. }
+            | Self::JsonValid { weight, .. }
+            | Self::JsonPathEquals { weight, .. }
+            | Self::CommandSucceeds { weight, .. }
+            | Self::CommandOutputContains { weight, .. }
             | Self::FileRead { weight, .. }
             | Self::TurnCountAtMost { weight, .. }
             | Self::NoPathEscape { weight, .. } => *weight,
@@ -515,6 +595,51 @@ pub fn validate_assertion_shape(index: usize, spec: &AssertionSpec) -> anyhow::R
             ..
         } if primary_selector_count(tool, tool_pattern, tool_kind) != 1 => Err(anyhow!(
             "no_tool_called assertion must declare exactly one of `tool`, `tool_pattern`, or `tool_kind`"
+        )),
+        AssertionSpec::FileContains { path, pattern, .. }
+        | AssertionSpec::FileNotContains { path, pattern, .. } => {
+            if path.trim().is_empty() {
+                Err(anyhow!("file content assertion must declare non-empty `path`"))
+            } else if pattern.trim().is_empty() {
+                Err(anyhow!(
+                    "file content assertion must declare non-empty `pattern`"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        AssertionSpec::FileEquals { path, .. }
+        | AssertionSpec::FileExists { path, .. }
+        | AssertionSpec::FileNotExists { path, .. }
+        | AssertionSpec::JsonValid { path, .. }
+        | AssertionSpec::JsonPathEquals { path, .. } if path.trim().is_empty() => {
+            Err(anyhow!("file assertion must declare non-empty `path`"))
+        }
+        AssertionSpec::JsonPathEquals { json_path, .. } if json_path.trim().is_empty() => {
+            Err(anyhow!(
+                "json_path_equals assertion must declare non-empty `json_path`"
+            ))
+        }
+        AssertionSpec::CommandSucceeds { command, .. }
+        | AssertionSpec::CommandOutputContains { command, .. }
+            if command.trim().is_empty() =>
+        {
+            Err(anyhow!("command assertion must declare non-empty `command`"))
+        }
+        AssertionSpec::CommandOutputContains { pattern, .. } if pattern.trim().is_empty() => {
+            Err(anyhow!(
+                "command_output_contains assertion must declare non-empty `pattern`"
+            ))
+        }
+        AssertionSpec::CommandSucceeds {
+            timeout_seconds: Some(0),
+            ..
+        }
+        | AssertionSpec::CommandOutputContains {
+            timeout_seconds: Some(0),
+            ..
+        } => Err(anyhow!(
+            "command assertion timeout_seconds must be positive"
         )),
         AssertionSpec::FileRead { path, .. } if path.trim().is_empty() => Err(anyhow!(
             "file_read assertion must declare non-empty `path` regex"

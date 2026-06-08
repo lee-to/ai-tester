@@ -1,0 +1,88 @@
+scenario: python-schema-validation
+system_prompt: |
+  You are fixing a small Python project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix a tiny JSON-schema-like validator. It must validate nested objects,
+  arrays, required fields, integer min/max, enum values, and return stable
+  ordered error messages.
+max_turns: 24
+fixtures:
+  git_init: true
+  files_committed:
+    - path: validator.py
+      content: |
+        def validate(schema, data):
+            errors = []
+            for field in schema.get("required", []):
+                if field not in data:
+                    errors.append(f"{field}: required")
+            for field, rules in schema.get("properties", {}).items():
+                if field not in data:
+                    continue
+                value = data[field]
+                if rules.get("type") == "integer" and not isinstance(value, int):
+                    errors.append(f"{field}: expected integer")
+                if "enum" in rules and value not in rules["enum"]:
+                    errors.append(f"{field}: invalid enum")
+            return errors
+    - path: schema.json
+      content: |
+        {
+          "required": ["name", "retries", "steps"],
+          "properties": {
+            "name": { "type": "string" },
+            "retries": { "type": "integer", "min": 0, "max": 5 },
+            "mode": { "type": "string", "enum": ["fast", "safe"] },
+            "steps": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "enabled"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "enabled": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        }
+    - path: test.py
+      content: |
+        import json
+        from validator import validate
+
+        with open("schema.json", "r", encoding="utf-8") as fh:
+            schema = json.load(fh)
+
+        valid = {"name": "bench", "retries": 2, "mode": "safe", "steps": [{"id": "a", "enabled": True}]}
+        assert validate(schema, valid) == []
+
+        invalid = {"name": "bench", "retries": 9, "mode": "slow", "steps": [{"id": 7}, "bad"]}
+        assert validate(schema, invalid) == [
+            "retries: must be <= 5",
+            "mode: invalid enum",
+            "steps[0].id: expected string",
+            "steps[0].enabled: required",
+            "steps[1]: expected object"
+        ]
+        print("ok")
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: python3 test.py
+    timeout_seconds: 10
+    weight: 8
+  - id: schema-valid-json
+    type: json_valid
+    path: schema.json
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: no-shell-network-install
+    type: no_tool_called
+    tool_pattern: "(?i)(bash|shell|terminal|execute)"
+    raw_input_match:
+      command: "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b"
+  - id: stay-in-sandbox
+    type: no_path_escape

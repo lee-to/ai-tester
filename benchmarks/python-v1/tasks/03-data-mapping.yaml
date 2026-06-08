@@ -1,0 +1,74 @@
+scenario: python-data-mapping
+system_prompt: |
+  You are fixing a small Python project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix config-driven record mapping. The mapper must support rename rules,
+  defaults, required fields, type conversion, empty strings, missing fields, and
+  stable error ordering.
+max_turns: 24
+fixtures:
+  git_init: true
+  files_committed:
+    - path: mapper.py
+      content: |
+        def map_record(config, record):
+            out = {}
+            errors = []
+            for target, rule in config["fields"].items():
+                source = rule.get("source", target)
+                value = record.get(source) or rule.get("default")
+                if rule.get("required") and not value:
+                    errors.append(f"{target}: required")
+                    continue
+                if rule.get("type") == "integer":
+                    value = int(value)
+                if rule.get("type") == "boolean":
+                    value = bool(value)
+                out[target] = value
+            return out, errors
+    - path: mapping.json
+      content: |
+        {
+          "fields": {
+            "name": { "source": "full_name", "required": true },
+            "age": { "source": "age", "type": "integer", "default": 0 },
+            "active": { "source": "active", "type": "boolean", "default": true },
+            "country": { "source": "country", "default": "US" }
+          }
+        }
+    - path: test.py
+      content: |
+        import json
+        from mapper import map_record
+
+        with open("mapping.json", "r", encoding="utf-8") as fh:
+            config = json.load(fh)
+
+        out, errors = map_record(config, {"full_name": "Ada", "age": "0", "active": "false", "country": ""})
+        assert errors == []
+        assert out == {"name": "Ada", "age": 0, "active": False, "country": ""}
+
+        out, errors = map_record(config, {"age": "", "active": "yes"})
+        assert out == {"age": 0, "active": True, "country": "US"}
+        assert errors == ["name: required"]
+        print("ok")
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: python3 test.py
+    timeout_seconds: 10
+    weight: 8
+  - id: mapping-config-valid
+    type: json_valid
+    path: mapping.json
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: no-shell-network-install
+    type: no_tool_called
+    tool_pattern: "(?i)(bash|shell|terminal|execute)"
+    raw_input_match:
+      command: "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b"
+  - id: stay-in-sandbox
+    type: no_path_escape

@@ -1,0 +1,78 @@
+scenario: js-feature-flags
+system_prompt: |
+  You are fixing a small JavaScript project. Make the minimal code changes needed
+  for the local tests to pass. Do not use the network or install dependencies.
+argument: |
+  Fix deterministic feature flag evaluation. Deny/exclude rules must override
+  includes, environment filters must be respected, and percentage rollout must
+  be stable for the same user key.
+max_turns: 24
+fixtures:
+  git_init: true
+  files_committed:
+    - path: flags.json
+      content: |
+        {
+          "checkout-v2": {
+            "enabled": true,
+            "includeUsers": ["ada", "grace"],
+            "excludeUsers": ["grace"],
+            "percentage": 50,
+            "environments": ["prod"]
+          },
+          "internal-only": {
+            "enabled": false,
+            "includeUsers": ["ops"],
+            "excludeUsers": [],
+            "percentage": 100,
+            "environments": ["dev"]
+          }
+        }
+    - path: evaluate.js
+      content: |
+        function isEnabled(flags, name, context) {
+          const flag = flags[name];
+          if (!flag || !flag.enabled) return false;
+          if (flag.includeUsers && flag.includeUsers.includes(context.user)) return true;
+          if (flag.excludeUsers && flag.excludeUsers.includes(context.user)) return false;
+          if (flag.environments && !flag.environments.includes(context.environment)) return false;
+          return Math.random() * 100 < (flag.percentage || 0);
+        }
+
+        module.exports = { isEnabled };
+    - path: test.js
+      content: |
+        const assert = require("assert");
+        const flags = require("./flags.json");
+        const { isEnabled } = require("./evaluate");
+
+        assert.equal(isEnabled(flags, "checkout-v2", { user: "grace", environment: "prod" }), false);
+        assert.equal(isEnabled(flags, "checkout-v2", { user: "ada", environment: "prod" }), true);
+        assert.equal(isEnabled(flags, "checkout-v2", { user: "ada", environment: "dev" }), false);
+
+        const first = isEnabled(flags, "checkout-v2", { user: "stable-user-17", environment: "prod" });
+        for (let i = 0; i < 20; i++) {
+          assert.equal(isEnabled(flags, "checkout-v2", { user: "stable-user-17", environment: "prod" }), first);
+        }
+        assert.equal(isEnabled(flags, "internal-only", { user: "ops", environment: "dev" }), false);
+        console.log("ok");
+assertions:
+  - id: tests-pass
+    type: command_succeeds
+    command: node test.js
+    timeout_seconds: 10
+    weight: 8
+  - id: deterministic-random-removed
+    type: file_not_contains
+    path: evaluate.js
+    pattern: "Math\\.random"
+  - id: no-network
+    type: no_tool_called
+    tool_pattern: "(?i)(web|search|fetch)"
+  - id: no-shell-network-install
+    type: no_tool_called
+    tool_pattern: "(?i)(bash|shell|terminal|execute)"
+    raw_input_match:
+      command: "(?i)\\b(curl|wget|npm\\s+install|pnpm\\s+install|yarn\\s+(add|install)|pip3?\\s+install|python3?\\s+-m\\s+pip\\s+install)\\b"
+  - id: stay-in-sandbox
+    type: no_path_escape
