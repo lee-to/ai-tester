@@ -199,6 +199,37 @@ fn cli_benchmark_missing_requirement_is_nonzero_by_default() {
 }
 
 #[test]
+fn cli_benchmark_missing_requirement_markdown_uses_report_format() {
+    let tmp = TempDir::new().expect("temp dir");
+    let suite = tmp.path().join("suite.yaml");
+    fs::write(
+        &suite,
+        "suite: missing-requirement\nrequirements:\n  commands:\n    - definitely_missing_ai_tester_command_4633176904 --version\nscenarios:\n  - file: tasks/selected.yaml\n",
+    )
+    .expect("suite written");
+
+    let mut cmd = Command::cargo_bin("ai-tester").expect("binary");
+    cmd.current_dir(tmp.path())
+        .args([
+            "benchmark",
+            "--suite",
+            suite.to_str().unwrap(),
+            "--format",
+            "markdown",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "# ai-tester benchmark: missing-requirement",
+        ))
+        .stdout(predicate::str::contains("**Status:** SKIP"))
+        .stdout(predicate::str::contains("| Missing requirement | Status |"))
+        .stdout(predicate::str::contains(
+            "definitely_missing_ai_tester_command",
+        ));
+}
+
+#[test]
 fn cli_benchmark_unmatched_filter_is_nonzero() {
     let tmp = TempDir::new().expect("temp dir");
     let tasks = tmp.path().join("tasks");

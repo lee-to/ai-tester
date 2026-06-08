@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -1074,6 +1075,26 @@ struct CommandResult {
     stderr: String,
 }
 
+fn read_pipe_to_string<R>(mut reader: R) -> Result<String, String>
+where
+    R: Read,
+{
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("read command output: {err}"))?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
+fn join_command_output(
+    handle: thread::JoinHandle<Result<String, String>>,
+    stream: &str,
+) -> Result<String, String> {
+    handle
+        .join()
+        .map_err(|_| format!("{stream} reader panicked"))?
+}
+
 fn run_sandbox_command(
     command: &str,
     timeout_seconds: Option<u64>,
@@ -1086,23 +1107,32 @@ fn run_sandbox_command(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("spawn command `{command}`: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("capture command `{command}` stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("capture command `{command}` stderr"))?;
+    let stdout_reader = thread::spawn(move || read_pipe_to_string(stdout));
+    let stderr_reader = thread::spawn(move || read_pipe_to_string(stderr));
     let timeout = Duration::from_secs(timeout_seconds.unwrap_or(30));
     let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|err| format!("collect command `{command}` output: {err}"))?;
+            Ok(Some(status)) => {
                 return Ok(CommandResult {
-                    status_success: output.status.success(),
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                    status_success: status.success(),
+                    stdout: join_command_output(stdout_reader, "stdout")?,
+                    stderr: join_command_output(stderr_reader, "stderr")?,
                 });
             }
             Ok(None) if started.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(format!(
                     "command timed out after {}s: `{command}`",
                     timeout.as_secs()

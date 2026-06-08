@@ -1059,6 +1059,35 @@ fn command_output_contains_matches_stderr_as_well_as_stdout() {
 }
 
 #[test]
+fn command_output_contains_drains_large_output_before_waiting() {
+    let tmp = TempDir::new().expect("temp dir");
+    let mut trace = TraceRecord::synthetic(Vec::new(), "done".to_string(), 1, None);
+    trace.runner.sandbox_path = Some(tmp.path().display().to_string());
+    let command = if cfg!(windows) {
+        "powershell -NoProfile -Command \"$text = 'x' * 200000; [Console]::Out.Write($text); [Console]::Out.Write('needle')\""
+    } else {
+        "i=0; while [ $i -lt 200000 ]; do printf x; i=$((i + 1)); done; printf needle"
+    };
+
+    let results = evaluate_assertions(
+        &[AssertionSpec::CommandOutputContains {
+            id: "large-output".to_string(),
+            weight: 1.0,
+            command: command.to_string(),
+            pattern: "needle".to_string(),
+            timeout_seconds: Some(5),
+        }],
+        &trace,
+    );
+
+    let result = results
+        .iter()
+        .find(|result| result.id == "large-output")
+        .expect("large output assertion");
+    assert!(result.pass, "{results:#?}");
+}
+
+#[test]
 fn tool_called_accepts_tool_pattern() {
     let yaml = "scenario: pattern\nsystem_prompt: Body\nassertions:\n  - id: codegraph\n    type: tool_called\n    tool_pattern: '^mcp__.*__codegraph_context$'\n";
     let scenario = Scenario::from_yaml_str(yaml).expect("scenario parses");

@@ -88,6 +88,8 @@ struct BenchmarkReport {
     version: Option<u32>,
     category: Option<String>,
     description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    missing_requirements: Vec<BenchmarkRequirementFailure>,
     score: f64,
     correctness: f64,
     efficiency: f64,
@@ -136,36 +138,11 @@ pub fn benchmark_command(opts: BenchmarkOptions) -> anyhow::Result<i32> {
 
     let missing = missing_requirements(&suite.requirements);
     if !missing.is_empty() {
+        let report = skip_report(&suite, missing);
         match opts.format {
-            OutputFormat::Json => println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": "SKIP",
-                    "suite": suite.suite,
-                    "category": suite.category,
-                    "skipped": true,
-                    "missingRequirements": missing,
-                }))?
-            ),
-            _ => {
-                println!("{}", ui::header("ai-tester", "benchmark"));
-                println!(
-                    "  {} {}",
-                    ui::paint("●", Tone::Warning),
-                    ui::paint(
-                        &format!(
-                            "SKIP {}: missing {}",
-                            suite.suite,
-                            missing
-                                .iter()
-                                .map(|failure| format!("{} ({})", failure.command, failure.status))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        ),
-                        Tone::Warning,
-                    )
-                );
-            }
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            OutputFormat::Markdown => println!("{}", render_markdown(&report)),
+            OutputFormat::Live => print_live(&report, &opts),
         }
         return Ok(if opts.allow_skip { 0 } else { 1 });
     }
@@ -306,6 +283,7 @@ fn run_suite(
         version: suite.version,
         category: suite.category.clone(),
         description: suite.description.clone(),
+        missing_requirements: Vec::new(),
         score,
         correctness,
         efficiency,
@@ -317,6 +295,16 @@ fn run_suite(
         scenarios_failed: failed,
         scenarios,
     })
+}
+
+fn skip_report(
+    suite: &BenchmarkSuite,
+    missing_requirements: Vec<BenchmarkRequirementFailure>,
+) -> BenchmarkReport {
+    BenchmarkReport {
+        missing_requirements,
+        ..empty_report(suite, "SKIP")
+    }
 }
 
 fn selected_scenarios<'a>(
@@ -339,6 +327,7 @@ fn empty_report(suite: &BenchmarkSuite, status: &str) -> BenchmarkReport {
         version: suite.version,
         category: suite.category.clone(),
         description: suite.description.clone(),
+        missing_requirements: Vec::new(),
         score: 0.0,
         correctness: 0.0,
         efficiency: 0.0,
@@ -611,6 +600,22 @@ fn print_live(report: &BenchmarkReport, opts: &BenchmarkOptions) {
     println!();
     println!("  {}", ui::section("Scenarios"));
     if report.scenarios.is_empty() {
+        if report.status == "SKIP" {
+            for failure in &report.missing_requirements {
+                println!(
+                    "  {} {}",
+                    ui::paint("●", Tone::Warning),
+                    ui::paint(
+                        &format!(
+                            "SKIP missing requirement: {} ({})",
+                            failure.command, failure.status
+                        ),
+                        Tone::Warning,
+                    )
+                );
+            }
+            return;
+        }
         println!(
             "  {} {}",
             ui::paint("●", Tone::Error),
@@ -646,6 +651,14 @@ fn render_markdown(report: &BenchmarkReport) -> String {
         report.score, report.correctness, report.efficiency
         , format_duration(report.duration_ms), report.tokens_total, report.tool_calls_total
     ));
+    if !report.missing_requirements.is_empty() {
+        out.push_str("| Missing requirement | Status |\n");
+        out.push_str("| --- | --- |\n");
+        for failure in &report.missing_requirements {
+            out.push_str(&format!("| `{}` | {} |\n", failure.command, failure.status));
+        }
+        return out;
+    }
     out.push_str(
         "| Scenario | Result | Score | Correctness | Efficiency | Duration | Tokens | Tools |\n",
     );
@@ -815,6 +828,7 @@ mod tests {
             version: Some(1),
             category: Some("regression".to_string()),
             description: None,
+            missing_requirements: Vec::new(),
             score: weighted_average(&scenarios, total_weight, |scenario| scenario.score),
             correctness: weighted_average(&scenarios, total_weight, |scenario| {
                 scenario.correctness
