@@ -348,8 +348,6 @@ fn execute_scenarios(
             Ok(result) => result,
             Err(err) => {
                 if !silent {
-                    println!("  {}{}", ui::label("result"), ui::status("ERROR", false));
-                    println!("  {}{err}", ui::label("reason"));
                     if let Some(transcript) = &acp_transcript_for_error {
                         println!(
                             "  {}{}",
@@ -358,8 +356,18 @@ fn execute_scenarios(
                         );
                     }
                 }
-                runtime_errors += 1;
-                continue;
+                let mut result = crate::runtime::RuntimeRunResult::new(
+                    scenario
+                        .max_turns
+                        .unwrap_or(crate::config::INTERNAL_MAX_TURNS),
+                    scenario.max_turns.is_some(),
+                );
+                result.stopped_reason = "error".to_string();
+                result.errors.push(crate::trace::TraceError {
+                    kind: "runtime".to_string(),
+                    message: err.to_string(),
+                });
+                result
             }
         };
         let finished_at = Utc::now();
@@ -375,18 +383,16 @@ fn execute_scenarios(
             sandbox_path: Some(sandbox.path.display().to_string()),
         });
 
-        if record.errors.is_empty() {
-            let mut assertions = evaluate_assertions(&scenario.assertions, &record);
-            if record.runner.hit_max_turns && record.runner.max_turns_user_set {
-                assertions.push(turn_budget_assertion(&record));
-            }
-            let all_passed = assertions.iter().all(|result| result.pass);
-            let weighted = compute_weighted_score(&assertions);
-            record.assertions = assertions;
-            record.scoring.all_passed = all_passed;
-            record.scoring.overall_pass = all_passed;
-            record.scoring.weighted_score = Some(weighted);
+        let mut assertions = evaluate_assertions(&scenario.assertions, &record);
+        if record.runner.hit_max_turns && record.runner.max_turns_user_set {
+            assertions.push(turn_budget_assertion(&record));
         }
+        let all_passed = assertions.iter().all(|result| result.pass);
+        let weighted = compute_weighted_score(&assertions);
+        record.assertions = assertions;
+        record.scoring.all_passed = all_passed;
+        record.scoring.overall_pass = all_passed && record.errors.is_empty();
+        record.scoring.weighted_score = Some(weighted);
 
         let trace_path = write_trace(&runs_dir, &record)?;
         if !silent {
@@ -496,8 +502,10 @@ fn render_markdown(records: &[TraceRecord]) -> String {
         return out;
     }
 
-    out.push_str("| Scenario | Skill | Runtime | Result | Score | Turns | Duration |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "| Scenario | Skill | Runtime | Result | Stopped reason | Score | Turns | Duration |\n",
+    );
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for record in records {
         let result = if !record.errors.is_empty() {
             "ERROR"
@@ -512,11 +520,12 @@ fn render_markdown(records: &[TraceRecord]) -> String {
             .map(|s| format!("{:.0}%", s * 100.0))
             .unwrap_or_else(|| "—".to_string());
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {}/{} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {}/{} | {} |\n",
             record.scenario.name,
             record.skill.name,
             record.runner.runtime,
             result,
+            record.runner.stopped_reason,
             score,
             record.runner.turns_used,
             record.runner.max_turns,
@@ -1285,6 +1294,7 @@ fn print_scenario_result(record: &TraceRecord, trace_path: &Path, verbose: bool)
         ui::label("trace"),
         ui::fit_value(trace_path.display(), 15)
     );
+    println!("  {}{}", ui::label("stopped"), record.runner.stopped_reason);
 
     if verbose && !record.assertions.is_empty() {
         println!("  {}", ui::section("Assertions"));

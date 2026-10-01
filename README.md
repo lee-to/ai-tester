@@ -14,6 +14,12 @@ LLM tests that mock the model are easy to write and weak at catching production 
 
 `ai-tester` creates a throwaway sandbox per scenario, runs the selected runtime, records every normalized turn and tool call, and evaluates the run against YAML assertions.
 
+The sandbox isolates scenario files in a temporary workspace, with an optional
+Git repository. It is not an OS sandbox or a network boundary: subprocesses
+inherit host access unless the selected runtime enforces its own restrictions.
+Trace assertions such as `no_path_escape` observe recorded behavior; they do not
+contain processes or prevent unrecorded access.
+
 ## Features
 
 - **Native Rust CLI.** No Node runtime or embedded SDK dependency.
@@ -613,6 +619,10 @@ matchers.
 Commands run inside the scenario sandbox after the model finishes and before the
 sandbox is cleaned up. They default to a 30 second timeout.
 
+Assertions also run against the available evidence after a runtime failure or
+interruption, before cleanup. A passing file or command assertion records an
+observed effect; it does not turn an interrupted execution into a successful run.
+
 ### `file_read`
 
 Runtime-neutral check that a file was actually inspected. It matches Claude
@@ -844,5 +854,48 @@ cargo test
 ```
 
 The test suite uses fake runtime executables and golden JSONL-style fixtures. CI must not call real model providers.
+
+### Execution completion and failure coverage
+
+Claude and Codex JSONL streams require a terminal event (`result` or
+`turn.completed`/`turn.failed`). EOF without completion, an unfinished later
+turn, or malformed JSONL is incomplete evidence, even if the subprocess exits
+with code `0`. Valid events before the interruption remain in the saved trace.
+A nonzero subprocess exit records a runtime error alongside that evidence.
+Scripted follow-up prompts stop after a runtime failure or incomplete turn.
+
+Reports use the existing `runner.stoppedReason` field: `end_turn` denotes normal
+completion, `error` a runtime failure, `cancelled` an ACP cancellation, `timeout`
+a deadline, and `incomplete` a stream or ACP connection that ends without a
+terminal response. `max_turns` and `refusal` retain their existing meanings.
+Live and Markdown reports display the stopped reason; JSON includes it in each
+trace. Failures, cancellation, timeouts, and incomplete execution produce a
+nonzero exit code and cannot yield `scoring.overallPass: true`, even when all
+assertions pass. `scoring.allPassed` and the weighted score describe the
+assertions separately from execution success.
+
+A recorded tool call proves that the call was observed. A missing response
+(`resultContent: null`, including when `resultIsError` is `false`) does not prove
+success or failure of its effect. Use existing `file_contains`,
+`json_path_equals`, or command assertions to observe actual sandbox state.
+Failure fixtures write a synthetic file and a separate effect journal, then
+lose the tool response; both are checked independently of the trace.
+
+The failure coverage maps to the issue's fault matrix as follows:
+
+| Fault | Deterministic coverage |
+| --- | --- |
+| Exit after a tool event, before completion | `runner_failures::subprocess_exit_and_truncated_streams_keep_evidence_in_every_report_format` and `acp_disconnect_truncation_and_cancellation_preserve_effects_and_clean_up` |
+| Exit before consuming the prompt | `runner_failures::runtime_exit_before_reading_stdin_still_preserves_stdout_and_effects` verifies evidence survives a broken stdin pipe |
+| Hang or ignore cancellation | `runner_failures::acp_silent_hang_preserves_tool_evidence_and_kills_the_unresponsive_process`; existing `rust_cli_sandbox::cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace` also checks descendants |
+| Truncated JSONL or missing completion | `rust_core::jsonl_parsers_preserve_partial_evidence_without_terminal_completion` and the subprocess/ACP failure tests above |
+| Commit effect, then lose response | The subprocess/ACP failure tests compare file assertions and the independent journal; `runner_failures::tool_call_alone_does_not_prove_an_effect` supplies the no-effect control |
+| Interrupt a later scripted turn | `runner_failures::interrupted_scripted_turn_preserves_previous_turns_and_stops_followups` |
+| Terminal ACP response immediately before EOF | `runner_failures::acp_terminal_response_before_eof_keeps_queued_tool_evidence` |
+
+Timeout and process-tree coverage uses the current ACP deadline contract.
+Claude/Codex subprocess adapters currently have no runner wall-clock timeout;
+`--acp-turn-timeout` applies only to ACP. Setup-command timeouts are covered
+separately by `rust_core::fixtures_setup_timeout_kills_process_tree`.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for development and release details.

@@ -153,7 +153,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
 
     let user_message_count = user_messages.len();
     let mut session_closed = false;
-    for (message_index, user_message) in user_messages.into_iter().enumerate() {
+    'turns: for (message_index, user_message) in user_messages.into_iter().enumerate() {
         if result.turns_used >= max_turns {
             result.stopped_reason = "max_turns".to_string();
             break;
@@ -169,12 +169,20 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         });
         result.turns_used += 1;
 
-        let mut prompt = connection
+        let mut prompt = match connection
             .send_request_pending(
                 "session/prompt",
                 wire::PromptRequest::text(session_id.clone(), user_message),
             )
-            .await?;
+            .await
+        {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                result.stopped_reason = "incomplete".to_string();
+                push_acp_trace_error(&mut result, "acp_prompt", err.to_string());
+                break;
+            }
+        };
         let turn_deadline = tokio::time::Instant::now() + acp_turn_timeout;
         loop {
             let Some(update_timeout) = next_acp_update_timeout(turn_deadline, idle_timeout) else {
@@ -197,7 +205,12 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             )
             .await
             {
-                Ok(message) => message?,
+                Ok(Ok(message)) => message,
+                Ok(Err(err)) => {
+                    result.stopped_reason = "incomplete".to_string();
+                    push_acp_trace_error(&mut result, "acp_incomplete", err.to_string());
+                    break 'turns;
+                }
                 Err(_) if tokio::time::Instant::now() >= turn_deadline => {
                     handle_acp_turn_timeout(
                         &mut connection,
@@ -212,7 +225,15 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
                     session_closed = true;
                     break;
                 }
-                Err(_) => return Err(acp_timeout_error("session update", idle_timeout).into()),
+                Err(_) => {
+                    result.stopped_reason = "timeout".to_string();
+                    push_acp_trace_error(
+                        &mut result,
+                        "acp_update_timeout",
+                        acp_timeout_error("session update", idle_timeout).to_string(),
+                    );
+                    break 'turns;
+                }
             };
             if apply_acp_session_message(message, &client_bridge, &mut result, &mut progress)
                 .await?
@@ -222,7 +243,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             }
         }
 
-        if session_closed {
+        if session_closed || !result.errors.is_empty() {
             break;
         }
 
@@ -237,9 +258,6 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
     }
     flush_bridge_tool_calls(&client_bridge, &mut result);
 
-    if result.stopped_reason == "other" && result.errors.is_empty() {
-        result.stopped_reason = "end_turn".to_string();
-    }
     if let Some(mut progress) = progress {
         progress.finish();
     }
@@ -1252,6 +1270,12 @@ async fn apply_acp_session_message(
         }
         SessionMessage::StopReason(reason) => {
             out.stopped_reason = stop_reason_to_string(reason);
+            if out.stopped_reason == "cancelled" {
+                push_acp_trace_error(out, "acp_cancelled", "ACP prompt turn was cancelled");
+            } else if out.stopped_reason == "other" {
+                out.stopped_reason = "incomplete".to_string();
+                push_acp_trace_error(out, "acp_incomplete", "unrecognized ACP stop reason");
+            }
             flush_bridge_tool_calls(client_bridge, out);
             if let Some(progress) = progress {
                 progress.stop_reason(&out.stopped_reason);
@@ -1323,6 +1347,9 @@ async fn handle_acp_turn_timeout(
             }
             Err(_) => break,
         }
+    }
+    if out.stopped_reason != "cancelled" {
+        out.stopped_reason = "timeout".to_string();
     }
 
     match close_acp_session(connection, session_id.clone(), cleanup_timeout).await {

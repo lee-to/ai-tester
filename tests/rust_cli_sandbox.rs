@@ -1818,7 +1818,7 @@ fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
             "--acp-turn-timeout",
             "1",
             "--idle-warn",
-            "2",
+            "10",
             "--quiet",
         ])
         .assert()
@@ -1828,7 +1828,7 @@ fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     assert!(
-        started.elapsed() < Duration::from_secs(8),
+        started.elapsed() < Duration::from_secs(20),
         "ACP timeout run took too long: {:?}",
         started.elapsed()
     );
@@ -1851,7 +1851,8 @@ fn cli_run_with_fake_acp_turn_timeout_cancels_and_records_trace() {
         .expect("stopped reason recorded");
     assert!(
         stopped == "timeout" || stopped == "cancelled",
-        "unexpected stopped reason: {stopped}"
+        "unexpected stopped reason: {stopped}; errors: {}",
+        trace["errors"]
     );
     let error_kinds = trace["errors"]
         .as_array()

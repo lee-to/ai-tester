@@ -1265,16 +1265,12 @@ impl AcpConnection {
         &mut self,
         pending: &mut PendingResponse,
     ) -> Result<SessionMessage, Error> {
+        // Drain queued evidence before observing EOF, then prefer an already
+        // received terminal response over the transport closing immediately after it.
         tokio::select! {
             biased;
-            update = self.updates.recv() => {
-                match update {
-                    Some(update) => Ok(SessionMessage::SessionNotification(update)),
-                    None => Err(Error::internal("ACP stdout closed")),
-                }
-            }
-            err = self.errors.recv() => {
-                Err(err.unwrap_or_else(|| Error::internal("ACP connection closed")))
+            Some(update) = self.updates.recv() => {
+                Ok(SessionMessage::SessionNotification(update))
             }
             response = &mut pending.receiver => {
                 let value = response
@@ -1282,16 +1278,17 @@ impl AcpConnection {
                 let response: PromptResponse = serde_json::from_value(value)?;
                 Ok(SessionMessage::StopReason(response.stop_reason))
             }
+            err = self.errors.recv() => {
+                Err(err.unwrap_or_else(|| Error::internal("ACP connection closed")))
+            }
         }
     }
 
     pub(crate) async fn read_update(&mut self) -> Result<SessionMessage, Error> {
         tokio::select! {
-            update = self.updates.recv() => {
-                match update {
-                    Some(update) => Ok(SessionMessage::SessionNotification(update)),
-                    None => Err(Error::internal("ACP stdout closed")),
-                }
+            biased;
+            Some(update) = self.updates.recv() => {
+                Ok(SessionMessage::SessionNotification(update))
             }
             err = self.errors.recv() => {
                 Err(err.unwrap_or_else(|| Error::internal("ACP connection closed")))
