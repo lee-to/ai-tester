@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- ACP terminals drain stdout and stderr before publishing normal completion, so output and truncation metadata are final when `terminal/wait_for_exit` returns.
 - Runtime reports retain partial Claude/Codex/ACP traces, require explicit stream completion, and show the stopped reason in live and Markdown output. Assertions observe available evidence before cleanup even on runtime errors, while incomplete, cancelled, timed-out, or failed execution cannot pass.
 - Rewrote `ai-tester` from TypeScript/Node to a native Rust CLI.
 - Removed npm packaging and Node SDK runtime dependencies; runtime adapters now call external `claude` and `codex` CLIs and parse JSONL output.

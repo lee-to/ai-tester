@@ -350,16 +350,22 @@ impl TerminalManager {
             .map_err(|err| acp_invalid_params(format!("terminal create failed: {err}")))?;
         let pid = child.id();
         let output = Arc::new(Mutex::new(BoundedOutput::new(limit)));
+        let mut readers = Vec::new();
         if let Some(stdout) = child.stdout.take() {
-            spawn_output_reader(stdout, Arc::clone(&output));
+            readers.push(spawn_output_reader(stdout, Arc::clone(&output)));
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_output_reader(stderr, Arc::clone(&output));
+            readers.push(spawn_output_reader(stderr, Arc::clone(&output)));
         }
         let status = Arc::new(Mutex::new(None));
         let status_for_waiter = Arc::clone(&status);
         thread::spawn(move || {
             if let Ok(exit_status) = child.wait() {
+                // A completed terminal must expose all output already written
+                // to its pipes, including the final truncation flag.
+                for reader in readers {
+                    let _ = reader.join();
+                }
                 let terminal_status = exit_status_to_terminal(exit_status);
                 if let Ok(mut status) = status_for_waiter.lock() {
                     if status.is_none() {
@@ -507,7 +513,10 @@ impl BoundedOutput {
     }
 }
 
-fn spawn_output_reader(mut reader: impl Read + Send + 'static, output: Arc<Mutex<BoundedOutput>>) {
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    output: Arc<Mutex<BoundedOutput>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
@@ -520,7 +529,7 @@ fn spawn_output_reader(mut reader: impl Read + Send + 'static, output: Arc<Mutex
                 }
             }
         }
-    });
+    })
 }
 
 fn set_status_once(
@@ -708,24 +717,28 @@ mod tests {
     #[tokio::test]
     async fn bridge_terminal_reports_output_truncation_and_unknown_ids() {
         let tmp = TempDir::new().expect("temp dir");
-        let bridge = bridge(tmp.path(), Duration::from_secs(2));
+        let bridge = bridge(tmp.path(), Duration::from_secs(10));
 
         let created = bridge
             .handle_create_terminal(print_terminal_request(tmp.path(), 4))
             .expect("terminal created");
         let terminal_id = created.terminal_id.to_string();
-        bridge
+        let waited = bridge
             .handle_wait_for_terminal_exit(WaitForTerminalExitRequest::new(
                 "s1",
                 terminal_id.clone(),
             ))
             .await
             .expect("wait succeeds");
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
         let output = bridge
             .handle_terminal_output(TerminalOutputRequest::new("s1", terminal_id))
             .expect("output succeeds");
         assert!(output.truncated);
-        assert!(output.output.len() <= 4);
+        #[cfg(windows)]
+        assert_eq!(output.output, "ij\r\n");
+        #[cfg(not(windows))]
+        assert_eq!(output.output, "ghij");
 
         let err = bridge
             .handle_kill_terminal(KillTerminalRequest::new("s1", "missing-terminal"))
@@ -754,14 +767,50 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn bridge_terminal_wait_drains_stdout_and_stderr_before_completion() {
+        let tmp = TempDir::new().expect("temp dir");
+        let bridge = bridge(tmp.path(), Duration::from_secs(10));
+        #[cfg(windows)]
+        let request = CreateTerminalRequest::new("s1", "cmd").args(vec![
+            "/D".to_string(),
+            "/C".to_string(),
+            "for /L %i in (1,1,2048) do @(echo X&echo Y 1>&2)".to_string(),
+        ]);
+        #[cfg(not(windows))]
+        let request = CreateTerminalRequest::new("s1", "sh").args(vec![
+            "-c".to_string(),
+            "i=0; while [ \"$i\" -lt 2048 ]; do printf X; printf Y >&2; i=$((i+1)); done"
+                .to_string(),
+        ]);
+        let created = bridge
+            .handle_create_terminal(request.cwd(Some(tmp.path().to_path_buf())))
+            .expect("terminal created");
+        let terminal_id = created.terminal_id.to_string();
+        let waited = bridge
+            .handle_wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                "s1",
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("wait succeeds");
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
+        let output = bridge
+            .handle_terminal_output(TerminalOutputRequest::new("s1", terminal_id))
+            .expect("output succeeds");
+        assert!(!output.truncated);
+        assert_eq!(output.output.chars().filter(|c| *c == 'X').count(), 2048);
+        assert_eq!(output.output.chars().filter(|c| *c == 'Y').count(), 2048);
+    }
+
     fn print_terminal_request(root: &Path, limit: u64) -> CreateTerminalRequest {
         #[cfg(windows)]
         {
-            CreateTerminalRequest::new("s1", "powershell")
+            CreateTerminalRequest::new("s1", "cmd")
                 .args(vec![
-                    "-NoProfile".to_string(),
-                    "-Command".to_string(),
-                    "Write-Output abcdefghij".to_string(),
+                    "/D".to_string(),
+                    "/C".to_string(),
+                    "echo abcdefghij".to_string(),
                 ])
                 .cwd(Some(root.to_path_buf()))
                 .output_byte_limit(Some(limit))
