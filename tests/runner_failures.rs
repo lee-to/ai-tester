@@ -35,16 +35,21 @@ fn write_fake_runtime(bin: &Path, runtime: &str) {
     {
         fs::write(
             bin.join(format!("{runtime}.cmd")),
-            format!("@echo off\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0{runtime}.ps1\" %*\r\nexit /b %errorlevel%\r\n"),
+            // Consume the known Codex --cd position in CMD. CLI flags, including
+            // its stdin marker '-', must not enter PowerShell's parameter binder.
+            format!("@echo off\r\nset \"AI_TESTER_RUNTIME_CWD=\"\r\nif \"%~1\"==\"exec\" if \"%~4\"==\"--cd\" set \"AI_TESTER_RUNTIME_CWD=%~5\"\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0{runtime}.ps1\"\r\nexit /b %errorlevel%\r\n"),
         )
         .unwrap();
         fs::write(
             bin.join(format!("{runtime}.ps1")),
             r#"
 if ($env:AI_TESTER_EXIT -ne '8') { [Console]::In.ReadToEnd() | Out-Null }
-for ($i = 0; $i -lt $args.Length - 1; $i++) {
-    if ($args[$i] -eq '--cd') { Set-Location -LiteralPath $args[$i + 1] }
+if ($env:AI_TESTER_RUNTIME_CWD) {
+    Set-Location -LiteralPath $env:AI_TESTER_RUNTIME_CWD
+} elseif (Test-Path -LiteralPath $env:AI_TESTER_CWD_STATE) {
+    Set-Location -LiteralPath ([IO.File]::ReadAllText($env:AI_TESTER_CWD_STATE))
 }
+[IO.File]::WriteAllText($env:AI_TESTER_CWD_STATE, (Get-Location).Path)
 
 Add-Content -LiteralPath $env:AI_TESTER_ATTEMPTS -Value 'attempt'
 $stream = $env:AI_TESTER_STREAM
@@ -75,6 +80,10 @@ while [ "$#" -gt 0 ]; do
     if [ "$1" = '--cd' ]; then shift; cd "$1" || exit 99; fi
     shift
 done
+if [ -f "$AI_TESTER_CWD_STATE" ]; then
+    cd "$(cat "$AI_TESTER_CWD_STATE")" || exit 99
+fi
+pwd > "$AI_TESTER_CWD_STATE"
 printf 'attempt\n' >> "$AI_TESTER_ATTEMPTS"
 stream="$AI_TESTER_STREAM"
 if [ -f "$AI_TESTER_FIRST_STREAM" ] && [ "$(wc -l < "$AI_TESTER_ATTEMPTS" | tr -d ' ')" = 1 ]; then
@@ -254,6 +263,7 @@ fn check_run(runtime: &str, fault: &Fault<'_>, format: &str, stopped: &str) -> V
         .env("AI_TESTER_STREAM", stream)
         .env("AI_TESTER_FIRST_STREAM", first_stream)
         .env("AI_TESTER_ATTEMPTS", &attempts)
+        .env("AI_TESTER_CWD_STATE", tmp.path().join("runtime-cwd.txt"))
         .env("AI_TESTER_JOURNAL", &journal)
         .env(
             "AI_TESTER_COMMIT_EFFECT",
