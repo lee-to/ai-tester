@@ -361,11 +361,8 @@ impl TerminalManager {
         let status_for_waiter = Arc::clone(&status);
         thread::spawn(move || {
             if let Ok(exit_status) = child.wait() {
-                // A completed terminal must expose all output already written
-                // to its pipes, including the final truncation flag.
-                for reader in readers {
-                    let _ = reader.join();
-                }
+                // Process completion is independent of pipe EOF: descendants
+                // can retain inherited stdout/stderr after this child exits.
                 let terminal_status = exit_status_to_terminal(exit_status);
                 if let Ok(mut status) = status_for_waiter.lock() {
                     if status.is_none() {
@@ -380,6 +377,7 @@ impl TerminalManager {
             pid,
             output,
             status,
+            readers,
         });
         self.entries
             .lock()
@@ -407,19 +405,38 @@ impl TerminalManager {
         let entry = self.entry(terminal_id)?;
         let deadline = Instant::now() + self.wait_timeout;
         loop {
-            if let Some(status) = entry
+            let status = entry
                 .status
                 .lock()
                 .map_err(|_| acp_invalid_params("terminal status lock poisoned"))?
-                .clone()
-            {
+                .clone();
+            if let Some(status) = status {
+                // Give foreground output time to drain, without waiting forever
+                // for a descendant to close its inherited pipe handles.
+                let drain_deadline = Instant::now() + Duration::from_millis(250);
+                while !entry.readers.iter().all(thread::JoinHandle::is_finished)
+                    && Instant::now() < drain_deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 return Ok(WaitForTerminalExitResponse::new(status));
             }
             if Instant::now() >= deadline {
                 let timeout_status = TerminalExitStatus::new().signal(Some("timeout".to_string()));
-                set_status_once(&entry.status, timeout_status.clone())?;
-                let _ = kill_process_tree(entry.pid);
-                return Ok(WaitForTerminalExitResponse::new(timeout_status));
+                let status = {
+                    let mut status = entry
+                        .status
+                        .lock()
+                        .map_err(|_| acp_invalid_params("terminal status lock poisoned"))?;
+                    status.get_or_insert(timeout_status).clone()
+                };
+                if status.signal.as_deref() == Some("timeout") {
+                    let _ = kill_process_tree(entry.pid);
+                    return Ok(WaitForTerminalExitResponse::new(status));
+                }
+                // The waiter published an exit between the two status checks.
+                // Use the same bounded drain as any other observed completion.
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -479,6 +496,7 @@ struct TerminalEntry {
     pid: u32,
     output: Arc<Mutex<BoundedOutput>>,
     status: Arc<Mutex<Option<TerminalExitStatus>>>,
+    readers: Vec<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -801,6 +819,113 @@ mod tests {
         assert!(!output.truncated);
         assert_eq!(output.output.chars().filter(|c| *c == 'X').count(), 2048);
         assert_eq!(output.output.chars().filter(|c| *c == 'Y').count(), 2048);
+    }
+
+    // Run only this test in child test-harness processes so the fixture uses
+    // native inherited handles on Windows as well as Unix, without a shell.
+    #[test]
+    #[allow(clippy::zombie_processes)] // The fixture parent must exit before its descendant.
+    fn terminal_descendant_fixture() {
+        let Some(mode) = std::env::var_os("AI_TESTER_TERMINAL_DESCENDANT_MODE") else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os("AI_TESTER_TERMINAL_DESCENDANT_ROOT").unwrap());
+        if mode == "child" {
+            println!("descendant stdout");
+            eprintln!("descendant stderr");
+            fs::write(root.join("ready"), "ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !root.join("release").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::acp::client_capabilities::tests::terminal_descendant_fixture",
+                    "--nocapture",
+                ])
+                .env("AI_TESTER_TERMINAL_DESCENDANT_MODE", "child")
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !root.join("ready").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("ready").exists(), "descendant did not start");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_parent_exit_is_preserved_when_descendant_keeps_pipes_open() {
+        struct ReleaseDescendant(PathBuf);
+        impl Drop for ReleaseDescendant {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, "release");
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let release = ReleaseDescendant(tmp.path().join("release"));
+        let manager = TerminalManager::new(
+            Duration::from_secs(3),
+            BTreeMap::from([
+                (
+                    "AI_TESTER_TERMINAL_DESCENDANT_MODE".to_string(),
+                    "parent".to_string(),
+                ),
+                (
+                    "AI_TESTER_TERMINAL_DESCENDANT_ROOT".to_string(),
+                    tmp.path().to_string_lossy().into_owned(),
+                ),
+            ]),
+        );
+        let terminal_id = manager
+            .create(
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                vec![
+                    "--exact".to_string(),
+                    "runtime::acp::client_capabilities::tests::terminal_descendant_fixture"
+                        .to_string(),
+                    "--nocapture".to_string(),
+                ],
+                Vec::new(),
+                tmp.path().to_path_buf(),
+                None,
+            )
+            .unwrap();
+        let started = Instant::now();
+        let waited = manager.wait_for_exit(&terminal_id).await.unwrap();
+        let elapsed = started.elapsed();
+        let output = manager.output(&terminal_id).unwrap();
+        let entry = manager.entry(&terminal_id).unwrap();
+        let descendant_still_holds_pipes = entry.readers.iter().any(|reader| !reader.is_finished());
+        drop(release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entry.readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.release(&terminal_id).unwrap();
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
+        assert_eq!(waited.exit_status.signal, None);
+        assert!(elapsed < Duration::from_secs(2), "wait took {elapsed:?}");
+        assert!(
+            descendant_still_holds_pipes,
+            "fixture must retain the pipe handles"
+        );
+        assert!(
+            entry.readers.iter().all(thread::JoinHandle::is_finished),
+            "descendant did not exit after release"
+        );
+        assert!(output.output.contains("descendant stdout"), "{output:?}");
+        assert!(output.output.contains("descendant stderr"), "{output:?}");
+        assert_eq!(output.exit_status.unwrap().exit_code, Some(0));
     }
 
     fn print_terminal_request(root: &Path, limit: u64) -> CreateTerminalRequest {

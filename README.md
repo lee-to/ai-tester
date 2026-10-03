@@ -857,6 +857,11 @@ The test suite uses fake runtime executables and golden JSONL-style fixtures. CI
 
 ### Execution completion and failure coverage
 
+ACP terminal waits observe the command's exit separately from stdout/stderr EOF.
+After exit, they allow up to 250 ms for output draining. A descendant retaining
+inherited pipe handles does not turn a completed command into a timeout; output
+from such descendants may continue arriving after the wait returns.
+
 Claude and Codex JSONL streams require a terminal event (`result` or
 `turn.completed`/`turn.failed`). EOF without completion, an unfinished later
 turn, or malformed JSONL is incomplete evidence, even if the subprocess exits
@@ -866,8 +871,8 @@ Scripted follow-up prompts stop after a runtime failure or incomplete turn.
 
 Reports use the existing `runner.stoppedReason` field: `end_turn` denotes normal
 completion, `error` a runtime failure, `cancelled` an ACP cancellation, `timeout`
-a deadline, and `incomplete` a stream or ACP connection that ends without a
-terminal response. `max_turns` and `refusal` retain their existing meanings.
+a deadline, and `incomplete` a malformed stream, an ACP protocol error, or a
+connection that ends without a terminal response. `max_turns` and `refusal` retain their existing meanings.
 Live and Markdown reports display the stopped reason; JSON includes it in each
 trace. Failures, cancellation, timeouts, and incomplete execution produce a
 nonzero exit code and cannot yield `scoring.overallPass: true`, even when all
@@ -892,6 +897,8 @@ The failure coverage maps to the issue's fault matrix as follows:
 | Commit effect, then lose response | The subprocess/ACP failure tests compare file assertions and the independent journal; `runner_failures::tool_call_alone_does_not_prove_an_effect` supplies the no-effect control |
 | Interrupt a later scripted turn | `runner_failures::interrupted_scripted_turn_preserves_previous_turns_and_stops_followups` |
 | Terminal ACP response immediately before EOF | `runner_failures::acp_terminal_response_before_eof_keeps_queued_tool_evidence` |
+| ACP completion followed by a protocol error in one stdout burst | `runner_failures::acp_completion_does_not_hide_protocol_errors_in_the_same_stdout_burst` |
+| Exited ACP terminal parent with descendant retaining stdout/stderr | `runtime::acp::client_capabilities::tests::terminal_parent_exit_is_preserved_when_descendant_keeps_pipes_open` |
 
 Timeout and process-tree coverage uses the current ACP deadline contract.
 Claude/Codex subprocess adapters currently have no runner wall-clock timeout;

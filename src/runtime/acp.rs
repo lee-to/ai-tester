@@ -153,6 +153,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
 
     let user_message_count = user_messages.len();
     let mut session_closed = false;
+    let mut transport_failed = false;
     'turns: for (message_index, user_message) in user_messages.into_iter().enumerate() {
         if result.turns_used >= max_turns {
             result.stopped_reason = "max_turns".to_string();
@@ -207,6 +208,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             {
                 Ok(Ok(message)) => message,
                 Ok(Err(err)) => {
+                    transport_failed = true;
                     result.stopped_reason = "incomplete".to_string();
                     push_acp_trace_error(&mut result, "acp_incomplete", err.to_string());
                     break 'turns;
@@ -243,6 +245,7 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
             }
         }
 
+        transport_failed |= collect_acp_protocol_errors(&mut connection, &mut result);
         if session_closed || !result.errors.is_empty() {
             break;
         }
@@ -253,9 +256,10 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         }
     }
 
-    if !session_closed {
+    if !session_closed && !transport_failed {
         let _ = close_acp_session(&mut connection, session_id.clone(), idle_timeout).await;
     }
+    collect_acp_protocol_errors(&mut connection, &mut result);
     flush_bridge_tool_calls(&client_bridge, &mut result);
 
     if let Some(mut progress) = progress {
@@ -269,6 +273,19 @@ async fn run_acp_async(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResul
         result.diagnostics.extend(logger.diagnostics());
     }
     Ok(result)
+}
+
+fn collect_acp_protocol_errors(
+    connection: &mut AcpConnection,
+    result: &mut RuntimeRunResult,
+) -> bool {
+    let errors = connection.take_protocol_errors();
+    let failed = !errors.is_empty();
+    for err in errors {
+        result.stopped_reason = "incomplete".to_string();
+        push_acp_trace_error(result, "acp_incomplete", err.to_string());
+    }
+    failed
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

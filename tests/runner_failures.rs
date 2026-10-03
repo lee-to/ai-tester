@@ -125,11 +125,20 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
         'session/prompt' {
             Add-Content -LiteralPath $env:AI_TESTER_ATTEMPTS -Value 'attempt'
-            [Console]::Out.Write([IO.File]::ReadAllText($env:AI_TESTER_STREAM))
-            [Console]::Out.Flush()
+            if (-not $env:AI_TESTER_ACP_TAIL) {
+                [Console]::Out.Write([IO.File]::ReadAllText($env:AI_TESTER_STREAM))
+                [Console]::Out.Flush()
+            }
             if ($env:AI_TESTER_COMMIT_EFFECT -eq '1') {
                 [IO.File]::WriteAllText((Join-Path (Get-Location) 'effect.txt'), 'committed')
                 [IO.File]::WriteAllText($env:AI_TESTER_JOURNAL, 'committed')
+            }
+            if ($env:AI_TESTER_ACP_TAIL) {
+                $response = @{ jsonrpc = '2.0'; id = $message.id; result = @{ stopReason = 'end_turn' } } | ConvertTo-Json -Compress -Depth 32
+                $burst = [IO.File]::ReadAllText($env:AI_TESTER_STREAM) + $response + "`n" + [IO.File]::ReadAllText($env:AI_TESTER_ACP_TAIL)
+                [Console]::Out.Write($burst)
+                [Console]::Out.Flush()
+                exit 0
             }
             if ($env:AI_TESTER_EXIT -eq '-1') {
                 while ($null -ne [Console]::In.ReadLine()) {} # ignore cancellation and close
@@ -166,10 +175,15 @@ while IFS= read -r line; do
             ;;
         *'"method":"session/prompt"'*)
             printf 'attempt\n' >> "$AI_TESTER_ATTEMPTS"
-            cat "$AI_TESTER_STREAM"
+            if [ -z "$AI_TESTER_ACP_TAIL" ]; then cat "$AI_TESTER_STREAM"; fi
             if [ "$AI_TESTER_COMMIT_EFFECT" = 1 ]; then
                 printf committed > effect.txt
                 printf committed > "$AI_TESTER_JOURNAL"
+            fi
+            if [ -n "$AI_TESTER_ACP_TAIL" ]; then
+                burst=$(cat "$AI_TESTER_STREAM"; printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"; cat "$AI_TESTER_ACP_TAIL")
+                printf '%s\n' "$burst"
+                exit 0
             fi
             if [ "$AI_TESTER_EXIT" = -1 ]; then
                 while IFS= read -r ignored; do :; done
@@ -221,12 +235,26 @@ struct Fault<'a> {
 }
 
 fn check_run(runtime: &str, fault: &Fault<'_>, format: &str, stopped: &str) -> Value {
+    check_run_with_acp_tail(runtime, fault, format, stopped, None)
+}
+
+fn check_run_with_acp_tail(
+    runtime: &str,
+    fault: &Fault<'_>,
+    format: &str,
+    stopped: &str,
+    tail: Option<&str>,
+) -> Value {
     let tmp = TempDir::new().unwrap();
     let bin = tmp.path().join("bin");
     fs::create_dir(&bin).unwrap();
     write_fake_runtime(&bin, runtime);
     let stream = tmp.path().join("stream.jsonl");
     fs::write(&stream, fault.stream).unwrap();
+    let tail_path = tmp.path().join("tail.jsonl");
+    if let Some(tail) = tail {
+        fs::write(&tail_path, tail).unwrap();
+    }
     let first_stream = tmp.path().join("first.jsonl");
     if let Some(first) = fault.first_turn {
         fs::write(&first_stream, first).unwrap();
@@ -257,6 +285,10 @@ fn check_run(runtime: &str, fault: &Fault<'_>, format: &str, stopped: &str) -> V
     let expected_code = if stopped == "end_turn" { 0 } else { 2 };
     let mut cmd = Command::cargo_bin("ai-tester").unwrap();
     let pid_file = tmp.path().join("runtime.pid");
+    cmd.env_remove("AI_TESTER_ACP_TAIL");
+    if tail.is_some() {
+        cmd.env("AI_TESTER_ACP_TAIL", &tail_path);
+    }
     let output = cmd
         .current_dir(tmp.path())
         .env("PATH", std::env::join_paths(paths).unwrap())
@@ -437,6 +469,45 @@ fn acp_terminal_response_before_eof_keeps_queued_tool_evidence() {
         "json",
         "end_turn",
     );
+}
+
+#[test]
+fn acp_completion_does_not_hide_protocol_errors_in_the_same_stdout_burst() {
+    for (tail, error) in [
+        ("{\"jsonrpc\":\n", "invalid ACP JSON-RPC stdout line"),
+        (
+            "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{}}\n",
+            "invalid session/update params",
+        ),
+        ("", ""), // The same burst followed by clean EOF still succeeds.
+    ] {
+        let trace = check_run_with_acp_tail(
+            "acp",
+            &Fault {
+                stream: include_str!("fixtures/runtime-failures/acp-partial.jsonl"),
+                exit: 0,
+                commit_effect: true,
+                first_turn: None,
+            },
+            "json",
+            if tail.is_empty() {
+                "end_turn"
+            } else {
+                "incomplete"
+            },
+            Some(tail),
+        );
+        assert_eq!(trace["scoring"]["allPassed"], true);
+        if !tail.is_empty() {
+            assert!(
+                trace["errors"][0]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(error),
+                "{trace}"
+            );
+        }
+    }
 }
 
 #[test]

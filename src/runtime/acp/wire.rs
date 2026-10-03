@@ -1167,11 +1167,16 @@ pub(crate) type DebugCallback = Arc<dyn Fn(&str, LineDirection) + Send + Sync + 
 type PendingSender = oneshot::Sender<Result<Value, Error>>;
 type PendingMap = Arc<Mutex<HashMap<String, PendingSender>>>;
 
+enum TransportEvent {
+    Closed,
+    Error(Error),
+}
+
 pub(crate) struct AcpConnection {
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingMap,
     updates: mpsc::UnboundedReceiver<SessionNotification>,
-    errors: mpsc::UnboundedReceiver<Error>,
+    errors: mpsc::UnboundedReceiver<TransportEvent>,
     debug_callback: Option<DebugCallback>,
     next_id: u64,
     child: ManagedChildGuard,
@@ -1265,23 +1270,38 @@ impl AcpConnection {
         &mut self,
         pending: &mut PendingResponse,
     ) -> Result<SessionMessage, Error> {
-        // Drain queued evidence before observing EOF, then prefer an already
-        // received terminal response over the transport closing immediately after it.
+        // Retain queued evidence, but genuine protocol errors take precedence
+        // over completion. Only clean EOF may defer to an already received reply.
         tokio::select! {
             biased;
             Some(update) = self.updates.recv() => {
                 Ok(SessionMessage::SessionNotification(update))
             }
-            response = &mut pending.receiver => {
-                let value = response
-                    .map_err(|_| Error::internal("ACP pending request was dropped"))??;
-                let response: PromptResponse = serde_json::from_value(value)?;
-                Ok(SessionMessage::StopReason(response.stop_reason))
+            event = self.errors.recv() => {
+                match event {
+                    Some(TransportEvent::Error(err)) => Err(err),
+                    Some(TransportEvent::Closed) | None => {
+                        let response = pending.receiver.try_recv()
+                            .map_err(|_| Error::internal("ACP stdout closed"))?;
+                        prompt_stop_reason(response)
+                    }
+                }
             }
-            err = self.errors.recv() => {
-                Err(err.unwrap_or_else(|| Error::internal("ACP connection closed")))
+            response = &mut pending.receiver => {
+                prompt_stop_reason(response
+                    .map_err(|_| Error::internal("ACP pending request was dropped"))?)
             }
         }
+    }
+
+    pub(crate) fn take_protocol_errors(&mut self) -> Vec<Error> {
+        let mut errors = Vec::new();
+        while let Ok(event) = self.errors.try_recv() {
+            if let TransportEvent::Error(err) = event {
+                errors.push(err);
+            }
+        }
+        errors
     }
 
     pub(crate) async fn read_update(&mut self) -> Result<SessionMessage, Error> {
@@ -1291,10 +1311,18 @@ impl AcpConnection {
                 Ok(SessionMessage::SessionNotification(update))
             }
             err = self.errors.recv() => {
-                Err(err.unwrap_or_else(|| Error::internal("ACP connection closed")))
+                match err {
+                    Some(TransportEvent::Error(err)) => Err(err),
+                    Some(TransportEvent::Closed) | None => Err(Error::internal("ACP stdout closed")),
+                }
             }
         }
     }
+}
+
+fn prompt_stop_reason(response: Result<Value, Error>) -> Result<SessionMessage, Error> {
+    let response: PromptResponse = serde_json::from_value(response?)?;
+    Ok(SessionMessage::StopReason(response.stop_reason))
 }
 
 impl Drop for AcpConnection {
@@ -1357,7 +1385,7 @@ async fn stdout_loop(
     writer: Arc<Mutex<ChildStdin>>,
     pending: PendingMap,
     updates: mpsc::UnboundedSender<SessionNotification>,
-    errors: mpsc::UnboundedSender<Error>,
+    errors: mpsc::UnboundedSender<TransportEvent>,
     request_handler: RequestHandler,
     debug_callback: Option<DebugCallback>,
 ) {
@@ -1367,7 +1395,9 @@ async fn stdout_loop(
             Ok(Some(line)) => line,
             Ok(None) => break,
             Err(err) => {
-                let _ = errors.send(Error::internal(format!("read ACP stdout failed: {err}")));
+                let _ = errors.send(TransportEvent::Error(Error::internal(format!(
+                    "read ACP stdout failed: {err}"
+                ))));
                 return;
             }
         };
@@ -1377,10 +1407,10 @@ async fn stdout_loop(
         let message = match serde_json::from_str::<Value>(&line) {
             Ok(message) => message,
             Err(err) => {
-                let _ = errors.send(Error::new(
+                let _ = errors.send(TransportEvent::Error(Error::new(
                     -32700,
                     format!("invalid ACP JSON-RPC stdout line: {err}: {line}"),
-                ));
+                )));
                 return;
             }
         };
@@ -1405,15 +1435,15 @@ async fn stdout_loop(
                     let _ = updates.send(update);
                 }
                 Err(err) => {
-                    let _ = errors.send(Error::invalid_params(format!(
+                    let _ = errors.send(TransportEvent::Error(Error::invalid_params(format!(
                         "invalid session/update params: {err}"
-                    )));
+                    ))));
                     return;
                 }
             }
         }
     }
-    let _ = errors.send(Error::internal("ACP stdout closed"));
+    let _ = errors.send(TransportEvent::Closed);
 }
 
 async fn stderr_loop(stderr: ChildStderr, debug_callback: Option<DebugCallback>) {
