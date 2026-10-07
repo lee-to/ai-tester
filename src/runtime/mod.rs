@@ -46,7 +46,7 @@ enum ProcessOutputMode {
 }
 
 impl RuntimeRunResult {
-    fn new(max_turns_effective: u32, max_turns_user_set: bool) -> Self {
+    pub(crate) fn new(max_turns_effective: u32, max_turns_user_set: bool) -> Self {
         Self {
             turns: Vec::new(),
             final_output: String::new(),
@@ -77,11 +77,14 @@ pub fn parse_codex_jsonl(
 ) -> anyhow::Result<RuntimeRunResult> {
     let mut out = RuntimeRunResult::new(max_turns_effective, max_turns_user_set);
     out.cost.source = "codex".to_string();
+    let mut completed = false;
+    let mut malformed = false;
 
     for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
         let event: Value = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(err) => {
+                malformed = true;
                 out.diagnostics
                     .push(format!("unparseable codex jsonl line: {err}"));
                 continue;
@@ -99,6 +102,7 @@ pub fn parse_codex_jsonl(
                     .map(ToOwned::to_owned);
             }
             "turn.started" => {
+                completed = false;
                 let turn = Turn {
                     index: out.turns.len(),
                     role: "assistant".to_string(),
@@ -123,6 +127,7 @@ pub fn parse_codex_jsonl(
                 }
             }
             "turn.completed" => {
+                completed = true;
                 if let Some(usage) = event.get("usage") {
                     out.cost.input_tokens += u64_field(usage, "input_tokens");
                     out.cost.output_tokens += u64_field(usage, "output_tokens");
@@ -133,6 +138,7 @@ pub fn parse_codex_jsonl(
                 }
             }
             "turn.failed" => {
+                completed = true;
                 out.stopped_reason = "error".to_string();
                 out.errors.push(TraceError {
                     kind: "codex_turn_failed".to_string(),
@@ -159,6 +165,7 @@ pub fn parse_codex_jsonl(
                 .push(format!("unsupported codex event: {other}")),
         }
     }
+    require_complete_stream(&mut out, "codex", completed, malformed);
     Ok(out)
 }
 
@@ -178,11 +185,14 @@ pub fn parse_claude_jsonl_with_user_responses(
 ) -> anyhow::Result<RuntimeRunResult> {
     let mut out = RuntimeRunResult::new(max_turns_effective, max_turns_user_set);
     out.cost.source = "claude".to_string();
+    let mut completed = false;
+    let mut malformed = false;
 
     for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
         let event: Value = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(err) => {
+                malformed = true;
                 out.diagnostics
                     .push(format!("unparseable claude jsonl line: {err}"));
                 continue;
@@ -201,9 +211,13 @@ pub fn parse_claude_jsonl_with_user_responses(
                         .map(ToOwned::to_owned);
                 }
             }
-            "assistant" => handle_claude_assistant(&event, &mut out, user_responses),
+            "assistant" => {
+                completed = false;
+                handle_claude_assistant(&event, &mut out, user_responses);
+            }
             "user" => handle_claude_user(&event, &mut out),
             "result" => {
+                completed = event.get("subtype").and_then(Value::as_str).is_some();
                 if let Some(result) = event.get("result").and_then(Value::as_str) {
                     out.final_output = result.to_string();
                 }
@@ -235,7 +249,27 @@ pub fn parse_claude_jsonl_with_user_responses(
                 .push(format!("unsupported claude event: {other}")),
         }
     }
+    require_complete_stream(&mut out, "claude", completed, malformed);
     Ok(out)
+}
+
+fn require_complete_stream(
+    out: &mut RuntimeRunResult,
+    runtime: &str,
+    completed: bool,
+    malformed: bool,
+) {
+    if (!completed || malformed) && out.errors.is_empty() {
+        out.stopped_reason = "incomplete".to_string();
+        out.errors.push(TraceError {
+            kind: format!("{runtime}_incomplete"),
+            message: if malformed {
+                "runtime stream contains malformed JSONL; evidence may be incomplete".to_string()
+            } else {
+                "runtime stream ended without a terminal completion event".to_string()
+            },
+        });
+    }
 }
 
 fn handle_codex_item(item: &Value, is_completed: bool, out: &mut RuntimeRunResult) {
@@ -647,9 +681,9 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
         } else {
             user_message.clone()
         };
-        let stdout = if idx == 0 {
+        let output = if idx == 0 {
             let args = build_codex_args(&req);
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)
         } else {
             let session = session_id.clone().unwrap_or_else(|| "--last".to_string());
             let args = vec![
@@ -659,18 +693,26 @@ fn run_codex(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
                 "--json".to_string(),
                 "-".to_string(),
             ];
-            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)?
+            run_process_with_stdin_jsonl("codex", &args, &prompt, req.progress, &req.scenario_env)
         };
-        let parsed = parse_codex_jsonl(&stdout, max_turns, max_turns_user_set)?;
+        let output = match output {
+            Ok(output) => output,
+            Err(err) => {
+                record_runtime_error(&mut combined, "codex_process", err.to_string());
+                break;
+            }
+        };
+        let mut parsed = parse_codex_jsonl(&output.stdout, max_turns, max_turns_user_set)?;
+        record_process_failure(&mut parsed, "codex", &output);
         if session_id.is_none() {
             session_id = parsed.session_id.clone();
         }
         merge_runtime_result(&mut combined, parsed);
+        if !combined.errors.is_empty() || combined.stopped_reason != "end_turn" {
+            break;
+        }
     }
     combined.session_id = session_id.or(combined.session_id);
-    if combined.stopped_reason == "other" && combined.errors.is_empty() {
-        combined.stopped_reason = "end_turn".to_string();
-    }
     Ok(combined)
 }
 
@@ -716,7 +758,7 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             user_message,
             idx == 0,
         );
-        let stdout = run_process(
+        let output = run_process(
             "claude",
             &args,
             Some(&req.cwd),
@@ -727,23 +769,67 @@ fn run_claude(req: RuntimeRunRequest) -> anyhow::Result<RuntimeRunResult> {
             } else {
                 ProcessOutputMode::Buffered
             },
-        )?;
-        let parsed = parse_claude_jsonl_with_user_responses(
-            &stdout,
+        );
+        let output = match output {
+            Ok(output) => output,
+            Err(err) => {
+                record_runtime_error(&mut combined, "claude_process", err.to_string());
+                break;
+            }
+        };
+        let mut parsed = parse_claude_jsonl_with_user_responses(
+            &output.stdout,
             max_turns,
             max_turns_user_set,
             &req.user_responses,
         )?;
+        record_process_failure(&mut parsed, "claude", &output);
         if session_id.is_none() {
             session_id = parsed.session_id.clone();
         }
         merge_runtime_result(&mut combined, parsed);
+        if !combined.errors.is_empty() || combined.stopped_reason != "end_turn" {
+            break;
+        }
     }
     combined.session_id = session_id.or(combined.session_id);
-    if combined.stopped_reason == "other" && combined.errors.is_empty() {
-        combined.stopped_reason = "end_turn".to_string();
-    }
     Ok(combined)
+}
+
+struct ProcessOutput {
+    stdout: String,
+    stderr: String,
+    status: std::process::ExitStatus,
+    stdin_error: Option<std::io::Error>,
+}
+
+fn record_runtime_error(out: &mut RuntimeRunResult, kind: &str, message: String) {
+    out.stopped_reason = "error".to_string();
+    out.errors.push(TraceError {
+        kind: kind.to_string(),
+        message,
+    });
+}
+
+fn record_process_failure(out: &mut RuntimeRunResult, runtime: &str, output: &ProcessOutput) {
+    if let Some(err) = &output.stdin_error {
+        record_runtime_error(
+            out,
+            &format!("{runtime}_process"),
+            format!("failed to write runtime stdin: {err}"),
+        );
+    }
+    if !output.status.success() {
+        record_runtime_error(
+            out,
+            &format!("{runtime}_process"),
+            format!(
+                "{runtime} failed ({}): {}",
+                exit_label(&output.status),
+                failure_detail(&output.stderr, &output.stdout)
+            ),
+        );
+    }
 }
 
 fn run_process_with_stdin_jsonl(
@@ -752,7 +838,7 @@ fn run_process_with_stdin_jsonl(
     stdin: &str,
     progress: bool,
     env: &BTreeMap<String, String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ProcessOutput> {
     run_process(
         command,
         args,
@@ -774,7 +860,7 @@ fn run_process(
     stdin: Option<&str>,
     env: &BTreeMap<String, String>,
     output_mode: ProcessOutputMode,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ProcessOutput> {
     let mut process = platform_command(command, args);
     if let Some(cwd) = cwd {
         process.current_dir(cwd);
@@ -785,13 +871,16 @@ fn run_process(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()?;
-    if let Some(stdin) = stdin {
+    let stdin_error = if let Some(stdin) = stdin {
         child
             .stdin
             .as_mut()
             .expect("stdin piped")
-            .write_all(stdin.as_bytes())?;
-    }
+            .write_all(stdin.as_bytes())
+            .err()
+    } else {
+        None
+    };
     drop(child.stdin.take());
 
     let stdout = child.stdout.take().expect("stdout piped");
@@ -810,14 +899,12 @@ fn run_process(
 
     let status = child.wait()?;
     let stderr = stderr_handle.join().unwrap_or_default();
-    if !status.success() {
-        anyhow::bail!(
-            "{command} failed ({}): {}",
-            exit_label(&status),
-            failure_detail(&stderr, &stdout)
-        );
-    }
-    Ok(stdout)
+    Ok(ProcessOutput {
+        stdout,
+        stderr,
+        status,
+        stdin_error,
+    })
 }
 
 fn exit_label(status: &std::process::ExitStatus) -> String {

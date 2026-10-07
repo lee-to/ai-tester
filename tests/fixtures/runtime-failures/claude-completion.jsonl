@@ -1,0 +1,2 @@
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"effect-1","content":"committed","is_error":false}]}}
+{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":1,"output_tokens":1}}

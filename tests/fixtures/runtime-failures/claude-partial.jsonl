@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"fault-session"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"effect-1","name":"Bash","input":{"command":"write-effect"}}]}}

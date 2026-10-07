@@ -1972,3 +1972,49 @@ fn claude_jsonl_parser_does_not_mark_subprocess_questions_answered() {
         .iter()
         .any(|diagnostic| diagnostic.contains("cannot deliver user_responses")));
 }
+
+#[test]
+fn jsonl_parsers_preserve_partial_evidence_without_terminal_completion() {
+    for (parser, partial, completion) in [
+        (
+            parse_codex_jsonl as fn(&str, u32, bool) -> anyhow::Result<_>,
+            include_str!("fixtures/runtime-failures/codex-partial.jsonl"),
+            include_str!("fixtures/runtime-failures/codex-completion.jsonl"),
+        ),
+        (
+            parse_claude_jsonl,
+            include_str!("fixtures/runtime-failures/claude-partial.jsonl"),
+            include_str!("fixtures/runtime-failures/claude-completion.jsonl"),
+        ),
+    ] {
+        for stream in [
+            String::new(),
+            partial.to_string(),
+            format!("{partial}{{\"type\":"),
+            format!("{partial}{completion}{{\"type\":"),
+        ] {
+            let parsed = parser(&stream, 40, false).expect("partial JSONL parses");
+            assert_eq!(parsed.stopped_reason, "incomplete");
+            assert!(!parsed.errors.is_empty());
+            if !stream.is_empty() {
+                assert_eq!(parsed.turns[0].tool_calls[0].id, "effect-1");
+            }
+            if stream.ends_with(':') {
+                assert!(!parsed.diagnostics.is_empty());
+            }
+        }
+        let completed =
+            parser(&format!("{partial}{completion}"), 40, false).expect("complete JSONL parses");
+        assert_eq!(completed.stopped_reason, "end_turn");
+        assert!(completed.errors.is_empty());
+        assert_eq!(
+            completed.turns[0].tool_calls[0].result_content.as_deref(),
+            Some("committed")
+        );
+
+        let interrupted_next_turn = parser(&format!("{partial}{completion}{partial}"), 40, false)
+            .expect("second partial turn parses");
+        assert_eq!(interrupted_next_turn.stopped_reason, "incomplete");
+        assert_eq!(interrupted_next_turn.turns.len(), 2);
+    }
+}

@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Deterministic runtime-failure fixtures covering interrupted and malformed streams, ACP cancellation and unresponsive-process cleanup, and file effects whose tool responses are lost.
 - Implemented `ai-tester trend`, `ai-tester trace`, and `ai-tester compare` for v2 traces under `runs/`, including human-readable output and `--json` modes.
 - Generic `runtime: acp` support for configured Agent Client Protocol agents, including `acp_agents` project config, `runner.agent`, `ai-tester run --agent`, ACP tool-call normalization, and automatic permission-request responses.
 
 ### Changed
 
+- ACP terminals preserve the command exit status and allow a bounded stdout/stderr drain before `terminal/wait_for_exit` returns, including when descendants retain inherited pipes.
+- ACP completion followed by malformed JSON or an invalid session notification remains a failed run; clean completion followed by EOF still succeeds.
+- Runtime reports retain partial Claude/Codex/ACP traces, require explicit stream completion, and show the stopped reason in live and Markdown output. Assertions observe available evidence before cleanup even on runtime errors, while incomplete, cancelled, timed-out, or failed execution cannot pass.
 - Rewrote `ai-tester` from TypeScript/Node to a native Rust CLI.
 - Removed npm packaging and Node SDK runtime dependencies; runtime adapters now call external `claude` and `codex` CLIs and parse JSONL output.
 - Trace output now uses Rust trace schema `2.0.0`.

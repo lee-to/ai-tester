@@ -350,16 +350,19 @@ impl TerminalManager {
             .map_err(|err| acp_invalid_params(format!("terminal create failed: {err}")))?;
         let pid = child.id();
         let output = Arc::new(Mutex::new(BoundedOutput::new(limit)));
+        let mut readers = Vec::new();
         if let Some(stdout) = child.stdout.take() {
-            spawn_output_reader(stdout, Arc::clone(&output));
+            readers.push(spawn_output_reader(stdout, Arc::clone(&output)));
         }
         if let Some(stderr) = child.stderr.take() {
-            spawn_output_reader(stderr, Arc::clone(&output));
+            readers.push(spawn_output_reader(stderr, Arc::clone(&output)));
         }
         let status = Arc::new(Mutex::new(None));
         let status_for_waiter = Arc::clone(&status);
         thread::spawn(move || {
             if let Ok(exit_status) = child.wait() {
+                // Process completion is independent of pipe EOF: descendants
+                // can retain inherited stdout/stderr after this child exits.
                 let terminal_status = exit_status_to_terminal(exit_status);
                 if let Ok(mut status) = status_for_waiter.lock() {
                     if status.is_none() {
@@ -374,6 +377,7 @@ impl TerminalManager {
             pid,
             output,
             status,
+            readers,
         });
         self.entries
             .lock()
@@ -401,19 +405,38 @@ impl TerminalManager {
         let entry = self.entry(terminal_id)?;
         let deadline = Instant::now() + self.wait_timeout;
         loop {
-            if let Some(status) = entry
+            let status = entry
                 .status
                 .lock()
                 .map_err(|_| acp_invalid_params("terminal status lock poisoned"))?
-                .clone()
-            {
+                .clone();
+            if let Some(status) = status {
+                // Give foreground output time to drain, without waiting forever
+                // for a descendant to close its inherited pipe handles.
+                let drain_deadline = Instant::now() + Duration::from_millis(250);
+                while !entry.readers.iter().all(thread::JoinHandle::is_finished)
+                    && Instant::now() < drain_deadline
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 return Ok(WaitForTerminalExitResponse::new(status));
             }
             if Instant::now() >= deadline {
                 let timeout_status = TerminalExitStatus::new().signal(Some("timeout".to_string()));
-                set_status_once(&entry.status, timeout_status.clone())?;
-                let _ = kill_process_tree(entry.pid);
-                return Ok(WaitForTerminalExitResponse::new(timeout_status));
+                let status = {
+                    let mut status = entry
+                        .status
+                        .lock()
+                        .map_err(|_| acp_invalid_params("terminal status lock poisoned"))?;
+                    status.get_or_insert(timeout_status).clone()
+                };
+                if status.signal.as_deref() == Some("timeout") {
+                    let _ = kill_process_tree(entry.pid);
+                    return Ok(WaitForTerminalExitResponse::new(status));
+                }
+                // The waiter published an exit between the two status checks.
+                // Use the same bounded drain as any other observed completion.
+                continue;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
@@ -473,6 +496,7 @@ struct TerminalEntry {
     pid: u32,
     output: Arc<Mutex<BoundedOutput>>,
     status: Arc<Mutex<Option<TerminalExitStatus>>>,
+    readers: Vec<thread::JoinHandle<()>>,
 }
 
 #[derive(Debug)]
@@ -507,7 +531,10 @@ impl BoundedOutput {
     }
 }
 
-fn spawn_output_reader(mut reader: impl Read + Send + 'static, output: Arc<Mutex<BoundedOutput>>) {
+fn spawn_output_reader(
+    mut reader: impl Read + Send + 'static,
+    output: Arc<Mutex<BoundedOutput>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
         loop {
@@ -520,7 +547,7 @@ fn spawn_output_reader(mut reader: impl Read + Send + 'static, output: Arc<Mutex
                 }
             }
         }
-    });
+    })
 }
 
 fn set_status_once(
@@ -708,24 +735,28 @@ mod tests {
     #[tokio::test]
     async fn bridge_terminal_reports_output_truncation_and_unknown_ids() {
         let tmp = TempDir::new().expect("temp dir");
-        let bridge = bridge(tmp.path(), Duration::from_secs(2));
+        let bridge = bridge(tmp.path(), Duration::from_secs(10));
 
         let created = bridge
             .handle_create_terminal(print_terminal_request(tmp.path(), 4))
             .expect("terminal created");
         let terminal_id = created.terminal_id.to_string();
-        bridge
+        let waited = bridge
             .handle_wait_for_terminal_exit(WaitForTerminalExitRequest::new(
                 "s1",
                 terminal_id.clone(),
             ))
             .await
             .expect("wait succeeds");
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
         let output = bridge
             .handle_terminal_output(TerminalOutputRequest::new("s1", terminal_id))
             .expect("output succeeds");
         assert!(output.truncated);
-        assert!(output.output.len() <= 4);
+        #[cfg(windows)]
+        assert_eq!(output.output, "ij\r\n");
+        #[cfg(not(windows))]
+        assert_eq!(output.output, "ghij");
 
         let err = bridge
             .handle_kill_terminal(KillTerminalRequest::new("s1", "missing-terminal"))
@@ -754,14 +785,157 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn bridge_terminal_wait_drains_stdout_and_stderr_before_completion() {
+        let tmp = TempDir::new().expect("temp dir");
+        let bridge = bridge(tmp.path(), Duration::from_secs(10));
+        #[cfg(windows)]
+        let request = CreateTerminalRequest::new("s1", "cmd").args(vec![
+            "/D".to_string(),
+            "/C".to_string(),
+            "for /L %i in (1,1,2048) do @(echo X&echo Y 1>&2)".to_string(),
+        ]);
+        #[cfg(not(windows))]
+        let request = CreateTerminalRequest::new("s1", "sh").args(vec![
+            "-c".to_string(),
+            "i=0; while [ \"$i\" -lt 2048 ]; do printf X; printf Y >&2; i=$((i+1)); done"
+                .to_string(),
+        ]);
+        let created = bridge
+            .handle_create_terminal(request.cwd(Some(tmp.path().to_path_buf())))
+            .expect("terminal created");
+        let terminal_id = created.terminal_id.to_string();
+        let waited = bridge
+            .handle_wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                "s1",
+                terminal_id.clone(),
+            ))
+            .await
+            .expect("wait succeeds");
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
+        let output = bridge
+            .handle_terminal_output(TerminalOutputRequest::new("s1", terminal_id))
+            .expect("output succeeds");
+        assert!(!output.truncated);
+        assert_eq!(output.output.chars().filter(|c| *c == 'X').count(), 2048);
+        assert_eq!(output.output.chars().filter(|c| *c == 'Y').count(), 2048);
+    }
+
+    // Run only this test in child test-harness processes so the fixture uses
+    // native inherited handles on Windows as well as Unix, without a shell.
+    #[test]
+    #[allow(clippy::zombie_processes)] // The fixture parent must exit before its descendant.
+    fn terminal_descendant_fixture() {
+        let Some(mode) = std::env::var_os("AI_TESTER_TERMINAL_DESCENDANT_MODE") else {
+            return;
+        };
+        let root = PathBuf::from(std::env::var_os("AI_TESTER_TERMINAL_DESCENDANT_ROOT").unwrap());
+        if mode == "child" {
+            println!("descendant stdout");
+            eprintln!("descendant stderr");
+            fs::write(root.join("ready"), "ready").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !root.join("release").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+        } else {
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "runtime::acp::client_capabilities::tests::terminal_descendant_fixture",
+                    "--nocapture",
+                ])
+                .env("AI_TESTER_TERMINAL_DESCENDANT_MODE", "child")
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !root.join("ready").exists() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert!(root.join("ready").exists(), "descendant did not start");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_parent_exit_is_preserved_when_descendant_keeps_pipes_open() {
+        struct ReleaseDescendant(PathBuf);
+        impl Drop for ReleaseDescendant {
+            fn drop(&mut self) {
+                let _ = fs::write(&self.0, "release");
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        let release = ReleaseDescendant(tmp.path().join("release"));
+        let manager = TerminalManager::new(
+            Duration::from_secs(3),
+            BTreeMap::from([
+                (
+                    "AI_TESTER_TERMINAL_DESCENDANT_MODE".to_string(),
+                    "parent".to_string(),
+                ),
+                (
+                    "AI_TESTER_TERMINAL_DESCENDANT_ROOT".to_string(),
+                    tmp.path().to_string_lossy().into_owned(),
+                ),
+            ]),
+        );
+        let terminal_id = manager
+            .create(
+                std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                vec![
+                    "--exact".to_string(),
+                    "runtime::acp::client_capabilities::tests::terminal_descendant_fixture"
+                        .to_string(),
+                    "--nocapture".to_string(),
+                ],
+                Vec::new(),
+                tmp.path().to_path_buf(),
+                None,
+            )
+            .unwrap();
+        let started = Instant::now();
+        let waited = manager.wait_for_exit(&terminal_id).await.unwrap();
+        let elapsed = started.elapsed();
+        let output = manager.output(&terminal_id).unwrap();
+        let entry = manager.entry(&terminal_id).unwrap();
+        let descendant_still_holds_pipes = entry.readers.iter().any(|reader| !reader.is_finished());
+        drop(release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while entry.readers.iter().any(|reader| !reader.is_finished()) && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        manager.release(&terminal_id).unwrap();
+        assert_eq!(waited.exit_status.exit_code, Some(0), "{waited:?}");
+        assert_eq!(waited.exit_status.signal, None);
+        assert!(elapsed < Duration::from_secs(2), "wait took {elapsed:?}");
+        assert!(
+            descendant_still_holds_pipes,
+            "fixture must retain the pipe handles"
+        );
+        assert!(
+            entry.readers.iter().all(thread::JoinHandle::is_finished),
+            "descendant did not exit after release"
+        );
+        assert!(output.output.contains("descendant stdout"), "{output:?}");
+        assert!(output.output.contains("descendant stderr"), "{output:?}");
+        assert_eq!(output.exit_status.unwrap().exit_code, Some(0));
+    }
+
     fn print_terminal_request(root: &Path, limit: u64) -> CreateTerminalRequest {
         #[cfg(windows)]
         {
-            CreateTerminalRequest::new("s1", "powershell")
+            CreateTerminalRequest::new("s1", "cmd")
                 .args(vec![
-                    "-NoProfile".to_string(),
-                    "-Command".to_string(),
-                    "Write-Output abcdefghij".to_string(),
+                    "/D".to_string(),
+                    "/C".to_string(),
+                    "echo abcdefghij".to_string(),
                 ])
                 .cwd(Some(root.to_path_buf()))
                 .output_byte_limit(Some(limit))
