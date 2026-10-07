@@ -7,17 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-07
+
 ### Added
 
 - Deterministic runtime-failure fixtures covering interrupted and malformed streams, ACP cancellation and unresponsive-process cleanup, and file effects whose tool responses are lost.
-- Implemented `ai-tester trend`, `ai-tester trace`, and `ai-tester compare` for v2 traces under `runs/`, including human-readable output and `--json` modes.
-- Generic `runtime: acp` support for configured Agent Client Protocol agents, including `acp_agents` project config, `runner.agent`, `ai-tester run --agent`, ACP tool-call normalization, and automatic permission-request responses.
 
 ### Changed
 
 - ACP terminals preserve the command exit status and allow a bounded stdout/stderr drain before `terminal/wait_for_exit` returns, including when descendants retain inherited pipes.
 - ACP completion followed by malformed JSON or an invalid session notification remains a failed run; clean completion followed by EOF still succeeds.
 - Runtime reports retain partial Claude/Codex/ACP traces, require explicit stream completion, and show the stopped reason in live and Markdown output. Assertions observe available evidence before cleanup even on runtime errors, while incomplete, cancelled, timed-out, or failed execution cannot pass.
+
+## [1.2.0] - 2026-06-08
+
+### Added
+
+- Deterministic JavaScript and Python benchmark suites with correctness and efficiency scoring, plus `ai-tester compare --benchmark` for benchmark reports.
+- Built-in ACP agent profiles, MCP server forwarding, model/mode negotiation, client filesystem and terminal capabilities, and redacted protocol logging.
+
+### Changed
+
+- Enforced Rust 1.82 compatibility and strengthened scenario validation, assertion matching, fixture environment handling, setup timeouts, and ACP cancellation and cleanup.
+
+## [1.1.0] - 2026-05-31
+
+### Added
+
+- Implemented `ai-tester trend`, `ai-tester trace`, and `ai-tester compare` for v2 traces under `runs/`, including human-readable output and `--json` modes.
+- Generic `runtime: acp` support for configured Agent Client Protocol agents, including `acp_agents` project config, `runner.agent`, `ai-tester run --agent`, ACP tool-call normalization, and automatic permission-request responses.
+
+## [1.0.0] - 2026-05-29
+
+### Changed
+
 - Rewrote `ai-tester` from TypeScript/Node to a native Rust CLI.
 - Removed npm packaging and Node SDK runtime dependencies; runtime adapters now call external `claude` and `codex` CLIs and parse JSONL output.
 - Trace output now uses Rust trace schema `2.0.0`.
@@ -98,7 +121,11 @@ Initial public release.
 - Live progress reporter with idle-warning (`--idle-warn`) and `--quiet` mode.
 - Weighted scoring (`scoring.weightedScore`).
 
-[Unreleased]: https://github.com/lee-to/ai-tester/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/lee-to/ai-tester/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/lee-to/ai-tester/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/lee-to/ai-tester/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/lee-to/ai-tester/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/lee-to/ai-tester/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.5.0
 [0.4.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.4.0
 [0.3.0]: https://github.com/lee-to/ai-tester/releases/tag/v0.3.0
